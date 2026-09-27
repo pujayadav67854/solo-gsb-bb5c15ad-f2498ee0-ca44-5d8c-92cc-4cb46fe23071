@@ -81,6 +81,20 @@
  * 取交集窗；窗内两人相对位置仍是分段一次函数，|u+vt|² ≤ reach² 是首项
  * 系数非负的二次不等式，复用 solveQuadraticLE 精确求解；全部子区间经
  * mergeIntervals 合并。全程解析，不做任何离散帧抽样。
+ *
+ * ---------- 区域限员（capacity zones） ----------
+ *
+ * 场景可携带若干限员区 capacityZones：
+ *   { id, name, x, y, width, height, capacity }
+ * 限员区为轴对齐矩形，capacity 为正整数人数上限。任一时刻的在区人数为
+ * 圆心**严格位于矩形内部**的表演者数（与入场口令同一开区间判定：贴边、
+ * 瞬时触及不计，0 宽/高的退化区域没有内部；同一人只计一次，与身体/
+ * 安全半径无关）。对每位表演者复用圆心停留区间（跨关键帧相接自动合并）
+ * 得到进入/离开事件，同一时刻的进出事件一并处理后扫描：相邻事件时刻
+ * 之间在场名单恒定——名单变化即分段，且只保留有正持续时间的段
+ * （不生成零长度段）。人数超过上限的段给出区间、人数与在场名单；
+ * 另统计全程峰值人数（只计有正持续时间的状态）。全程解析，不做任何
+ * 离散帧抽样。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -498,6 +512,8 @@
    * （triggered / missed / blocked）。
    * handoffs 为规整后的交接配置，handoffResults 每项给出两人同处
    * 交接区且间距≤触达距离的连续区间与起始时窗。
+   * capacityZones 为规整后的限员区，capacityResults 每区给出超员时间段
+   * （区间、人数、在场名单）与全程峰值人数。
    */
   function analyzeScene(scene) {
     var duration = Number(scene.duration);
@@ -581,6 +597,12 @@
       return analyzeHandoff(h, pa, pb, duration);
     });
 
+    // 区域限员：每区一条超员时间段与峰值人数结果
+    var capacityZones = normalizeCapacityZones(scene.capacityZones);
+    var capacityResults = capacityZones.map(function (z) {
+      return analyzeCapacityZone(z, ps, duration);
+    });
+
     return {
       duration: duration,
       pairCount: pairs.length,
@@ -590,6 +612,8 @@
       cueResults: cueResults,
       handoffs: handoffs,
       handoffResults: handoffResults,
+      capacityZones: capacityZones,
+      capacityResults: capacityResults,
       firstObstacleEntry: firstObstacle ? firstObstacle.firstEntry : null,
       firstObstacleConflict: firstObstacle
         ? [firstObstacle.performerId, firstObstacle.obstacleId]
@@ -1143,6 +1167,178 @@
     return false;
   }
 
+  // ---------- 区域限员（capacity zones） ----------
+  //
+  // 每项限员区 { id, name, x, y, width, height, capacity }：轴对齐矩形 +
+  // 正整数人数上限。在区人数 = 圆心严格位于矩形内部的表演者数（开区间
+  // 判定，贴边/瞬时触及不计，退化区域没有内部；同一人只计一次）。把每位
+  // 表演者的停留段（跨关键帧已合并）展开为进入/离开事件，同刻事件一并
+  // 处理后扫描：相邻事件时刻之间名单恒定，名单变化即分段，只保留正持续
+  // 段。人数 > capacity 的段即超员段；全程峰值只取正持续状态的最大值。
+
+  var ZONE_ID_PREFIX = 'z';
+  var ZONE_EPS = 1e-7; // 同刻进出事件归并 / 正持续段判定容差（秒）
+
+  function nextZoneId(existing) {
+    var used = {};
+    (existing || []).forEach(function (z) { used[z.id] = true; });
+    var id;
+    do {
+      id = ZONE_ID_PREFIX + Math.random().toString(36).slice(2, 8);
+    } while (used[id]);
+    return id;
+  }
+
+  /**
+   * 规整限员区：坐标/尺寸解析为有限数，width/height 钳为非负（0 宽/高的
+   * 退化区域没有内部，永远不会超员）；capacity 向下取整后必须 ≥ 1（正整数
+   * 人数上限），否则该项被丢弃；缺省 id 自动生成，缺省 name 用"限员区 N"。
+   * 返回顺序与入参一致的新数组 [{id,name,x,y,width,height,capacity}]。
+   */
+  function normalizeCapacityZones(zones) {
+    var list = Array.isArray(zones) ? zones : [];
+    var out = [];
+    list.forEach(function (raw) {
+      if (!raw || typeof raw !== 'object') return;
+      var x = Number(raw.x);
+      var y = Number(raw.y);
+      var w = Number(raw.width);
+      var h = Number(raw.height);
+      var cap = Number(raw.capacity);
+      if (![x, y, w, h, cap].every(isFinite)) return;
+      cap = Math.floor(cap);
+      if (cap < 1) return; // 人数上限必须为正整数
+      var id = (raw.id === null || raw.id === undefined || raw.id === '')
+        ? nextZoneId(out)
+        : String(raw.id);
+      var index = out.length + 1;
+      var name = (raw.name === null || raw.name === undefined || String(raw.name).trim() === '')
+        ? '限员区 ' + index
+        : String(raw.name);
+      out.push({
+        id: id,
+        name: name,
+        x: x,
+        y: y,
+        width: Math.max(0, w),
+        height: Math.max(0, h),
+        capacity: cap
+      });
+    });
+    return out;
+  }
+
+  /**
+   * 计算单个限员区的超员时间段（zone 须先经 normalizeCapacityZones 规整）。
+   * 返回 {
+   *   zoneId, zoneName, capacity,
+   *   segments: [{start,end,count,performerIds,performerNames}],
+   *      // 超员段：人数 > capacity 的正持续区间，段内名单恒定（名单变化即分段）
+   *   overcrowded,          // segments 是否非空
+   *   firstOverflow,        // 首次超员时刻（无超员为 null）
+   *   peakCount,            // 全程峰值在区人数（只计有正持续时间的状态）
+   *   peakStart, peakEnd,   // 首个达到峰值的区间（无人进入过为 null）
+   *   peakNames             // 该峰值区间的在场名单
+   * }
+   */
+  function analyzeCapacityZone(zone, performers, duration) {
+    var durationNum = Number(duration);
+    if (!(durationNum > 0)) throw new Error('duration 必须为正数');
+    var ps = Array.isArray(performers) ? performers : [];
+
+    var result = {
+      zoneId: zone.id,
+      zoneName: zone.name,
+      capacity: zone.capacity,
+      segments: [],
+      overcrowded: false,
+      firstOverflow: null,
+      peakCount: 0,
+      peakStart: null,
+      peakEnd: null,
+      peakNames: []
+    };
+
+    var X1 = zone.x + zone.width;
+    var Y1 = zone.y + zone.height;
+    if (!(X1 > zone.x) || !(Y1 > zone.y)) return result; // 零宽/高区域没有内部
+
+    // 每位表演者的停留段展开为进入/离开事件（同一人任意时刻至多在内一次）
+    var events = [];
+    ps.forEach(function (p, idx) {
+      var pid = (p && p.id !== null && p.id !== undefined) ? String(p.id) : '#' + idx;
+      var pname = (p && (p.name || p.id)) || ('表演者' + (idx + 1));
+      rectangleStayIntervals(p, zone, durationNum).forEach(function (iv) {
+        events.push({ t: iv[0], enter: true, id: pid, name: pname });
+        events.push({ t: iv[1], enter: false, id: pid, name: pname });
+      });
+    });
+    if (!events.length) return result;
+    events.sort(function (a, b) { return a.t - b.t; });
+
+    // 扫描：相邻事件时刻之间在场名单恒定；同一时刻的进出事件一并处理，
+    // 因此同刻换手（一人出、一人进）不会产生零长度中间态
+    var inside = {}; // id -> name（插入序即名单序）
+    var insideCount = 0;
+    var prevT = null;
+
+    function flushSegment(a, b) {
+      if (b - a <= ZONE_EPS || insideCount < 1) return; // 只保留有正持续时间的段
+      var ids = Object.keys(inside);
+      if (insideCount > result.peakCount) {
+        result.peakCount = insideCount;
+        result.peakStart = a;
+        result.peakEnd = b;
+        result.peakNames = ids.map(function (id) { return inside[id]; });
+      }
+      if (insideCount > zone.capacity) {
+        result.segments.push({
+          start: a,
+          end: b,
+          count: insideCount,
+          performerIds: ids,
+          performerNames: ids.map(function (id) { return inside[id]; })
+        });
+      }
+    }
+
+    var i = 0;
+    while (i < events.length) {
+      var t = events[i].t;
+      if (prevT !== null) flushSegment(prevT, t);
+      // 同刻事件归为一组，统一应用后再进入下一段
+      var j = i;
+      while (j < events.length && Math.abs(events[j].t - t) <= ZONE_EPS) {
+        var ev = events[j];
+        if (ev.enter) {
+          if (!inside[ev.id]) insideCount++;
+          inside[ev.id] = ev.name;
+        } else if (inside[ev.id]) {
+          insideCount--;
+          delete inside[ev.id];
+        }
+        j++;
+      }
+      prevT = t;
+      i = j;
+    }
+    // 停留段成对闭合，最后一批事件必为离开，无需收尾段
+
+    result.overcrowded = result.segments.length > 0;
+    result.firstOverflow = result.overcrowded ? result.segments[0].start : null;
+    return result;
+  }
+
+  /** 查询时刻 t 限员区是否处于超员段内（供画布高亮）。 */
+  function isZoneOvercrowded(result, t) {
+    if (!result || !result.segments) return false;
+    for (var i = 0; i < result.segments.length; i++) {
+      var iv = result.segments[i];
+      if (t + EPS >= iv.start && t - EPS <= iv.end) return true;
+    }
+    return false;
+  }
+
   // ---------- 方案快照：两场景对比 ----------
 
   var DIFF_EPS = 1e-6;   // 区间端点"时间变化"判定容差（秒）
@@ -1531,6 +1727,9 @@
     normalizeHandoffs: normalizeHandoffs,
     analyzeHandoff: analyzeHandoff,
     isHandoffActive: isHandoffActive,
+    normalizeCapacityZones: normalizeCapacityZones,
+    analyzeCapacityZone: analyzeCapacityZone,
+    isZoneOvercrowded: isZoneOvercrowded,
     compareScenes: compareScenes,
     builtinScene: builtinScene
   };

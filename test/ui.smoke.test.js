@@ -927,3 +927,146 @@ test('道具交接：拖走位即时重算，且配置随快照保存并在载�
     '载入恢复拖帧后的交接结果');
   dom.window.close();
 });
+
+// ---------- 区域限员 ----------
+
+test('区域限员：新增限员区、编辑坐标/上限即时重算、超员段点击跳转、删除', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  // 样例无限员区：显示空状态
+  assert.equal(doc.querySelectorAll('.zone-row').length, 0);
+  assert.equal(doc.getElementById('zone-empty').hidden, false);
+
+  // 新增：默认落在当前选中者甲 t=0 圆心 (60,300) 附近，仅甲短暂在区 -> 不超员
+  doc.getElementById('btn-zone-add').click();
+  await new Promise((r) => setTimeout(r, 5));
+  let rows = [...doc.querySelectorAll('.zone-row')];
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].classList.contains('over'), false);
+  assert.match(rows[0].querySelector('.zone-result').textContent, /全程未超员/);
+  assert.match(rows[0].querySelector('.zone-result').textContent, /峰值\s*1\s*人/);
+
+  function zoneInputs(row) {
+    return [...row.querySelectorAll('input[type="number"]')];
+  }
+  // 输入顺序：x, y, 宽, 高, 上限；先改 x=440，再改 y=240 -> 中央限员区
+  zoneInputs(rows[0])[0].value = '440';
+  zoneInputs(rows[0])[0].dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  const yInput = zoneInputs(doc.querySelectorAll('.zone-row')[0])[1];
+  yInput.value = '240';
+  yInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+
+  // 甲 [5.18,6.82]、乙 [4.62,7.38] 同时在区 -> 超员 1 段共 2 人，峰值 2
+  const row = doc.querySelectorAll('.zone-row')[0];
+  const resultText = row.querySelector('.zone-result').textContent;
+  assert.match(resultText, /超员\s*1\s*段/);
+  const chip = row.querySelector('.zone-over-chip');
+  assert.ok(chip, '列出超员区间芯片');
+  assert.match(chip.textContent, /5\.18–6\.82\s*s/);
+  assert.match(chip.textContent, /2\s*人/);
+  assert.match(chip.textContent, /甲/);
+  assert.match(chip.textContent, /乙/);
+  assert.match(resultText, /峰值\s*2\s*人/);
+  assert.ok(row.classList.contains('over'), '行标记超员态');
+
+  // 点击区间起点：播放头跳到 5.18
+  chip.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const tv = Number(doc.getElementById('time-input').value);
+  assert.ok(Math.abs(tv - 5.18) < 0.01, `播放头应跳到 5.18，实际 ${tv}`);
+
+  // 上限改为 2：不再超员（峰值仍 2）；非法上限 0/-3 被拒绝，保持 2
+  function capInput() {
+    return zoneInputs(doc.querySelectorAll('.zone-row')[0])[4];
+  }
+  capInput().value = '2';
+  capInput().dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.match(doc.querySelector('.zone-row .zone-result').textContent, /全程未超员/);
+  assert.equal(capInput().value, '2');
+  capInput().value = '0';
+  capInput().dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(capInput().value, '2', '上限必须为正整数：0 被拒绝');
+  capInput().value = '-3';
+  capInput().dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(capInput().value, '2', '上限必须为正整数：负数被拒绝');
+
+  // 宽改为 0（零宽区域）：没有内部，峰值归零且不再超员
+  const wInput = zoneInputs(doc.querySelectorAll('.zone-row')[0])[2];
+  wInput.value = '0';
+  wInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  const afterZero = doc.querySelector('.zone-row .zone-result').textContent;
+  assert.match(afterZero, /全程无人进入该区域/);
+  assert.ok(!doc.querySelector('.zone-row.over'), '零宽区域不计超员');
+
+  // 删除：回到空状态
+  doc.querySelector('.zone-row .zone-del').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(doc.querySelectorAll('.zone-row').length, 0);
+  assert.equal(doc.getElementById('zone-empty').hidden, false);
+  dom.window.close();
+});
+
+test('区域限员：拖走位即时重算，且配置随快照保存并在载入时恢复', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const canvas = doc.getElementById('stage');
+
+  function pointer(type, x, y) {
+    canvas.dispatchEvent(new window.MouseEvent(type, {
+      bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0
+    }));
+  }
+
+  // 新增中央限员区 (440,240,120,120) 上限 1 人
+  doc.getElementById('btn-zone-add').click();
+  await new Promise((r) => setTimeout(r, 5));
+  const inputs = [...doc.querySelectorAll('.zone-row input[type="number"]')];
+  inputs[0].value = '440';
+  inputs[0].dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  [...doc.querySelectorAll('.zone-row input[type="number"]')][1].value = '240';
+  doc.querySelectorAll('.zone-row input[type="number"]')[1]
+    .dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.ok(doc.querySelector('.zone-row.over'), '甲乙横穿时段超员');
+
+  // 存快照：限员配置随场景持久化
+  doc.getElementById('snap-name').value = '限员案';
+  doc.getElementById('btn-snap-save').click();
+  await new Promise((r) => setTimeout(r, 10));
+  const stored = JSON.parse(window.localStorage.getItem('trajectory-collision-stage.snapshots.v1'));
+  assert.equal(stored.list[0].scene.capacityZones.length, 1);
+  const sz = stored.list[0].scene.capacityZones[0];
+  assert.equal(sz.x, 440);
+  assert.equal(sz.y, 240);
+  assert.equal(sz.capacity, 1);
+  assert.match(doc.querySelector('.snap-item-meta').textContent, /1限员/);
+
+  // 拖动乙首帧 (500,40) -> (300,40)：乙不再经过中央限员区 -> 立即不超员
+  pointer('pointerdown', 500, 40);
+  pointer('pointermove', 300, 40);
+  pointer('pointerup', 300, 40);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.ok(!doc.querySelector('.zone-row.over'), '拖走位后即时重算，超员消失');
+  assert.match(doc.querySelector('.zone-row .zone-result').textContent, /全程未超员/);
+
+  // 重置样例（无限员区），再载入快照：配置与超员结果一并恢复
+  doc.getElementById('btn-sample').click();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(doc.querySelectorAll('.zone-row').length, 0);
+
+  doc.querySelector('.snap-item .snap-load').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(doc.querySelectorAll('.zone-row').length, 1, '载入快照后限员配置恢复');
+  assert.ok(doc.querySelector('.zone-row.over'), '载入恢复拖帧前的超员结果');
+  assert.ok(doc.querySelector('.zone-over-chip'), '超员区间芯片恢复');
+  dom.window.close();
+});

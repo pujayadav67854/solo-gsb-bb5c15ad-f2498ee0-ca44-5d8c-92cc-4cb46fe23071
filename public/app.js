@@ -21,6 +21,7 @@
     performers: [],
     obstacles: [],
     handoffs: [],
+    capacityZones: [],
     selectedPid: null,
     selectedKey: null,      // {pid, index}
     selectedObstacleId: null,
@@ -99,6 +100,14 @@
       h.minDuration = Math.round(h.minDuration * 100) / 100;
       return h;
     });
+    // 区域限员经引擎同一规整（缺省 id/name 补全、尺寸钳非负、人数上限为正整数）
+    state.capacityZones = Core.normalizeCapacityZones(scene.capacityZones).map(function (z) {
+      z.x = Math.round(z.x);
+      z.y = Math.round(z.y);
+      z.width = Math.round(z.width);
+      z.height = Math.round(z.height);
+      return z;
+    });
     state.selectedPid = state.performers[0] ? state.performers[0].id : null;
     state.selectedKey = null;
     state.selectedObstacleId = null;
@@ -138,13 +147,15 @@
       duration: state.duration,
       performers: state.performers,
       obstacles: state.obstacles,
-      handoffs: state.handoffs
+      handoffs: state.handoffs,
+      capacityZones: state.capacityZones
     });
     renderSummary();
     renderPairs();
     renderObstacleResults();
     renderCueResults();
     renderHandoffResults();
+    renderCapacityResults();
     renderTimelineDanger();
     updatePlayhead();
     refreshSnapshotDiff(); // 编辑场景后立即刷新方案对比
@@ -1102,6 +1113,207 @@
 
   handoffAddBtn.addEventListener('click', addHandoff);
 
+  // ---------- 区域限员面板 ----------
+  var zoneListEl = document.getElementById('zone-list');
+  var zoneEmptyEl = document.getElementById('zone-empty');
+  var zoneAddBtn = document.getElementById('btn-zone-add');
+  var ZONE_NEW_SIZE = 120;     // 新增限员区的默认边长
+  var ZONE_NEW_CAPACITY = 1;   // 新增限员区的默认人数上限
+
+  function zoneAfterStructuralChange() {
+    recompute();
+    renderZones();
+    draw();
+  }
+
+  // 新增限员区：以当前选中者在当前播放时刻的圆心为中心放默认尺寸矩形
+  // （无选中者时落在舞台中央；边界自动收回画布内），默认上限 1 人
+  function addZone() {
+    var p = getPerformer(state.selectedPid);
+    var cx = WORLD_W / 2;
+    var cy = WORLD_H / 2;
+    if (p) {
+      var st = Core.stateAt(p.keys, state.time, p.radius);
+      cx = st.x;
+      cy = st.y;
+    }
+    var size = ZONE_NEW_SIZE;
+    var x = clamp(Math.round(cx - size / 2), 0, Math.max(0, WORLD_W - size));
+    var y = clamp(Math.round(cy - size / 2), 0, Math.max(0, WORLD_H - size));
+    var normalized = Core.normalizeCapacityZones([{
+      x: x, y: y, width: size, height: size, capacity: ZONE_NEW_CAPACITY
+    }])[0];
+    state.capacityZones.push(normalized);
+    zoneAfterStructuralChange();
+  }
+
+  function removeZone(zid) {
+    state.capacityZones = state.capacityZones.filter(function (z) { return z.id !== zid; });
+    zoneAfterStructuralChange();
+  }
+
+  function commitZoneEdit(zid, field, rawValue) {
+    var z = state.capacityZones.find(function (x) { return x.id === zid; });
+    if (!z) return;
+    var v = Number(rawValue);
+    if (rawValue === '' || !isFinite(v)) return; // 输入中间态/非法：保留原值
+    if (field === 'x') {
+      z.x = clamp(Math.round(v), 0, Math.max(0, WORLD_W - z.width));
+    } else if (field === 'y') {
+      z.y = clamp(Math.round(v), 0, Math.max(0, WORLD_H - z.height));
+    } else if (field === 'width') {
+      z.width = clamp(Math.round(v), 0, Math.max(0, WORLD_W - z.x));
+    } else if (field === 'height') {
+      z.height = clamp(Math.round(v), 0, Math.max(0, WORLD_H - z.y));
+    } else if (field === 'capacity') {
+      var c = Math.round(v);
+      if (!(c >= 1)) {
+        renderZones(); // 人数上限必须为正整数：恢复原值显示
+        return;
+      }
+      z.capacity = c;
+    }
+    // 再次规整以兜底（尺寸钳非负、上限取整、id/name 保留）
+    state.capacityZones = Core.normalizeCapacityZones(state.capacityZones);
+    recompute();
+    renderZones();
+    draw();
+  }
+
+  function zoneResultById(zid) {
+    if (!state.analysis) return null;
+    return state.analysis.capacityResults.find(function (r) { return r.zoneId === zid; }) || null;
+  }
+
+  // 点击超员段芯片 / 峰值时刻：播放头跳到区间起点（事件委托）
+  zoneListEl.addEventListener('click', function (e) {
+    var el = e.target && typeof e.target.closest === 'function'
+      ? e.target.closest('.zone-over-chip, .t-jump') : null;
+    if (!el || !zoneListEl.contains(el)) return;
+    var t = Number(el.getAttribute('data-t'));
+    if (isFinite(t)) seek(t);
+  });
+
+  function zoneNumInput(z, field, opts) {
+    opts = opts || {};
+    var input = document.createElement('input');
+    input.type = 'number';
+    input.className = 'cue-num' + (opts.wide ? ' cue-num-wide' : '');
+    input.value = z[field];
+    input.step = opts.step || '1';
+    if (opts.min !== undefined) input.min = opts.min;
+    input.addEventListener('change', function () {
+      commitZoneEdit(z.id, field, input.value);
+    });
+    return input;
+  }
+
+  // 单区的结果区内容（超员段 + 峰值）
+  function zoneResultHtml(z, res) {
+    if (!res) return '<span class="zone-peak">—</span>';
+    var html = '';
+    if (res.overcrowded) {
+      var chips = res.segments.map(function (seg) {
+        return '<span class="zone-over-chip" data-t="' + seg.start +
+          '" title="点击跳转播放头到超员起点 ' + fmt(seg.start) + ' s">' +
+          fmt(seg.start) + '–' + fmt(seg.end) + ' s · ' + seg.count + ' 人 · ' +
+          escapeHtml(seg.performerNames.join('、')) + '</span>';
+      }).join('');
+      html += '<div class="zone-result-line"><span class="zone-warn">⚠ 超员 ' +
+        res.segments.length + ' 段（上限 ' + res.capacity + ' 人）</span> ' + chips + '</div>';
+    } else {
+      html += '<div class="zone-result-line"><span class="zone-ok">✓ 全程未超员</span>' +
+        '<span class="zone-peak">（上限 ' + res.capacity + ' 人）</span></div>';
+    }
+    if (res.peakCount > 0) {
+      html += '<div class="zone-result-line zone-peak">峰值 <b>' + res.peakCount +
+        ' 人</b> @ <span class="t-jump" data-t="' + res.peakStart +
+        '" title="点击跳转播放头到峰值起点">' + fmt(res.peakStart) + '–' + fmt(res.peakEnd) +
+        ' s</span> · ' + escapeHtml(res.peakNames.join('、')) + '</div>';
+    } else {
+      html += '<div class="zone-result-line zone-peak">全程无人进入该区域</div>';
+    }
+    return html;
+  }
+
+  // 只更新结果区（拖动走位等高频重算时不重建输入框，避免打断编辑）
+  function renderCapacityResults() {
+    Array.prototype.forEach.call(zoneListEl.querySelectorAll('.zone-row'), function (row) {
+      var z = state.capacityZones.find(function (x) { return x.id === row.dataset.zid; });
+      var resultEl = row.querySelector('.zone-result');
+      if (!z || !resultEl) return;
+      var res = zoneResultById(z.id);
+      resultEl.innerHTML = zoneResultHtml(z, res);
+      row.classList.toggle('over', !!(res && res.overcrowded));
+    });
+  }
+
+  function renderZones() {
+    zoneListEl.innerHTML = '';
+    if (!state.capacityZones.length) {
+      zoneEmptyEl.hidden = false;
+      zoneEmptyEl.textContent = '尚无限员区：点「＋ 新增限员区」在当前选中者圆心处投放一个区域，' +
+        '再改 x / y / 宽 / 高与人数上限（正整数）。';
+      return;
+    }
+    zoneEmptyEl.hidden = true;
+
+    state.capacityZones.forEach(function (z) {
+      var row = document.createElement('div');
+      row.className = 'zone-row';
+      row.dataset.zid = z.id;
+
+      var head = document.createElement('div');
+      head.className = 'zone-row-head';
+      var name = document.createElement('span');
+      name.className = 'zone-name';
+      name.textContent = z.name + ' ';
+      var capTag = document.createElement('span');
+      capTag.className = 'zone-cap-tag';
+      capTag.textContent = '限 ' + z.capacity + ' 人';
+      name.appendChild(capTag);
+      head.appendChild(name);
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'btn btn-mini zone-del';
+      del.textContent = '✕';
+      del.title = '删除该限员区';
+      del.addEventListener('click', function () { removeZone(z.id); });
+      head.appendChild(del);
+      row.appendChild(head);
+
+      var fields = document.createElement('div');
+      fields.className = 'cue-fields';
+      var geo = document.createElement('span');
+      geo.className = 'cue-field-group';
+      geo.appendChild(label('x'));
+      geo.appendChild(zoneNumInput(z, 'x'));
+      geo.appendChild(label('y'));
+      geo.appendChild(zoneNumInput(z, 'y'));
+      geo.appendChild(label('宽'));
+      geo.appendChild(zoneNumInput(z, 'width', { min: 0 }));
+      geo.appendChild(label('高'));
+      geo.appendChild(zoneNumInput(z, 'height', { min: 0 }));
+      var cap = document.createElement('span');
+      cap.className = 'cue-field-group';
+      cap.appendChild(label('上限'));
+      cap.appendChild(zoneNumInput(z, 'capacity', { min: 1 }));
+      cap.appendChild(document.createTextNode('人'));
+      fields.appendChild(geo);
+      fields.appendChild(cap);
+      row.appendChild(fields);
+
+      var result = document.createElement('div');
+      result.className = 'zone-result';
+      row.appendChild(result);
+
+      zoneListEl.appendChild(row);
+    });
+    renderCapacityResults();
+  }
+
+  zoneAddBtn.addEventListener('click', addZone);
+
   // ---------- 画布绘制 ----------
   function draw() {
     ctx.clearRect(0, 0, WORLD_W, WORLD_H);
@@ -1135,6 +1347,9 @@
 
     // 道具交接区（紫色虚线框，当前处于可交接区间时高亮并连线双方）
     drawHandoffs(t);
+
+    // 区域限员区（青色虚线框，当前超员时红色高亮并列出在场名单）
+    drawCapacityZones(t);
 
     // 入场口令矩形：只画当前选中表演者（边框颜色 = 触发状态）
     state.performers.forEach(function (p) {
@@ -1451,6 +1666,51 @@
     });
   }
 
+  // ---------- 区域限员区绘制 ----------
+  // 时刻 t 圆心严格位于限员区内部的人数与名单（仅用于画面实时标注；
+  // 超员区间的连续计算结果以 state.analysis.capacityResults 为准）
+  function zoneOccupancyAt(z, t) {
+    var count = 0;
+    var names = [];
+    state.performers.forEach(function (p) {
+      var st = Core.stateAt(p.keys, t, p.radius);
+      if (st.x > z.x && st.x < z.x + z.width &&
+          st.y > z.y && st.y < z.y + z.height) {
+        count++;
+        names.push(p.name);
+      }
+    });
+    return { count: count, names: names };
+  }
+
+  function drawCapacityZones(t) {
+    if (!state.capacityZones.length) return;
+    state.capacityZones.forEach(function (z) {
+      var res = zoneResultById(z.id);
+      var over = !!(res && Core.isZoneOvercrowded(res, t));
+      var occ = zoneOccupancyAt(z, t);
+      ctx.save();
+      ctx.fillStyle = over ? 'rgba(248,81,73,0.16)' : 'rgba(45,212,191,0.07)';
+      ctx.fillRect(z.x, z.y, z.width, z.height);
+      ctx.strokeStyle = over ? '#f85149' : 'rgba(45,212,191,0.8)';
+      ctx.lineWidth = over ? 2.5 : 1.5;
+      ctx.setLineDash([5, 4]);
+      ctx.strokeRect(z.x + 0.5, z.y + 0.5, Math.max(0, z.width - 1), Math.max(0, z.height - 1));
+      ctx.setLineDash([]);
+
+      // 标签：区名 + 当前人数/上限；超员时红色列出名单
+      ctx.font = 'bold 11px system-ui, sans-serif';
+      ctx.fillStyle = over ? '#ff8f8a' : 'rgba(94,234,212,0.92)';
+      ctx.fillText('限 ' + z.name + ' · ' + occ.count + '/' + z.capacity + ' 人', z.x + 6, z.y + 14);
+      if (over && occ.count > 0) {
+        ctx.font = '10px system-ui, sans-serif';
+        ctx.fillStyle = '#ffb3ae';
+        ctx.fillText('⚠ 超员：' + occ.names.join('、'), z.x + 6, z.y + z.height - 8);
+      }
+      ctx.restore();
+    });
+  }
+
   // ---------- 入场口令绘制（只画选中者） ----------
   var CUE_COLORS = {
     triggered: '#3fb950',
@@ -1619,6 +1879,7 @@
     document.getElementById('btn-add').disabled = state.performers.length >= 8;
     renderCues();
     renderHandoffs();
+    renderZones();
   }
 
   function addPerformer() {
@@ -2174,13 +2435,14 @@
   var snapStatusEl = document.getElementById('snap-status');
   var snapStatusTimer = null;
 
-  // 深拷贝当前场景（状态中的 performer/obstacle/handoff 均为纯数据）
+  // 深拷贝当前场景（状态中的 performer/obstacle/handoff/capacityZone 均为纯数据）
   function serializeScene() {
     return JSON.parse(JSON.stringify({
       duration: state.duration,
       performers: state.performers,
       obstacles: state.obstacles,
-      handoffs: state.handoffs
+      handoffs: state.handoffs,
+      capacityZones: state.capacityZones
     }));
   }
 
@@ -2331,6 +2593,7 @@
         var np = s.scene.performers ? s.scene.performers.length : 0;
         var no = s.scene.obstacles ? s.scene.obstacles.length : 0;
         var nh = s.scene.handoffs ? s.scene.handoffs.length : 0;
+        var nz = s.scene.capacityZones ? s.scene.capacityZones.length : 0;
 
         var nameEl = document.createElement('span');
         nameEl.className = 'snap-item-name';
@@ -2340,7 +2603,7 @@
         var meta = document.createElement('span');
         meta.className = 'snap-item-meta';
         meta.textContent = s.scene.duration + 's · ' + np + '人' + (no ? ' · ' + no + '禁入' : '') +
-          (nh ? ' · ' + nh + '交接' : '') + ' · ' + formatTime(s.createdAt);
+          (nh ? ' · ' + nh + '交接' : '') + (nz ? ' · ' + nz + '限员' : '') + ' · ' + formatTime(s.createdAt);
 
         var loadBtn = document.createElement('button');
         loadBtn.type = 'button';

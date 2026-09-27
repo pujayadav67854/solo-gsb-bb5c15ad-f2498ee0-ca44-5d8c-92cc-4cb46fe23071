@@ -28,7 +28,7 @@
       <div class="panel">
         <div class="panel-head">
           <span>舞台（世界坐标 1000 × 600）</span>
-          <span class="hint">拖动圆点走位 · 双击空白加帧 · 右键圆点删帧 · 选中圆点可改安全半径 · 拖动禁入区矩形移位 · 右键矩形删除 · 虚线彩框＝选中者的入场口令 · 紫色虚线框＝道具交接区</span>
+          <span class="hint">拖动圆点走位 · 双击空白加帧 · 右键圆点删帧 · 选中圆点可改安全半径 · 拖动禁入区矩形移位 · 右键矩形删除 · 虚线彩框＝选中者的入场口令 · 紫色虚线框＝道具交接区 · 青色虚线框＝限员区</span>
         </div>
         <div class="canvas-wrap">
           <canvas id="stage" width="1000" height="600"></canvas>
@@ -125,6 +125,21 @@
           沿分段直线轨迹连续求两人<strong>圆心同时严格位于交接区内部</strong>且<strong>间距 ≤ 触达距离</strong>
           的区间（贴边停留与仅瞬时触达不计，跨关键帧相接自动合并）；每段 [a,b] 若 b−a ≥ 最短持续秒数 d，
           给出起始时窗 [a, b−d]。<strong>点击时窗跳转播放头</strong>；编辑走位或交接参数即时重算，配置随快照保存。
+        </div>
+      </div>
+
+      <div class="panel panel-zones" id="panel-zones">
+        <div class="panel-head">
+          <span>区域限员（超员时段）</span>
+          <button id="btn-zone-add" class="btn btn-mini btn-primary" title="新增一个限员区：默认落在当前选中表演者的当前圆心处">＋ 新增限员区</button>
+        </div>
+        <div id="zone-list" class="zone-list"></div>
+        <div id="zone-empty" class="cue-empty" hidden></div>
+        <div class="cue-hint">
+          沿分段直线轨迹连续求<strong>圆心严格位于限员区内部</strong>的人数（贴边、瞬时触及与零宽/高区域不计，
+          同一人只计一次，跨关键帧停留自动合并，同刻进出一并处理）；人数超过上限即列出<strong>超员区间、
+          人数与在场名单</strong>（名单变化即分段，不生成零长度段），并显示全程<strong>峰值人数</strong>。
+          <strong>点击区间起点跳转播放头</strong>；编辑走位或限员配置即时重算，配置随快照保存。
         </div>
       </div>
 

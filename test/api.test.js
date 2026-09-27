@@ -485,3 +485,136 @@ test('GET /api/sample：样例携带交接配置，回传分析得可交接区�
   assert.ok(Math.abs(res.windows[0][0] - 4560 / 880) < 1e-9);
   assert.ok(Math.abs(res.windows[0][1] - (6000 / 880 - 0.5)) < 1e-9);
 });
+
+// ---------- 区域限员 capacityZones ----------
+
+test('POST /api/analyze：接受 capacityZones 并返回超员段、名单与峰值', async () => {
+  const body = {
+    duration: 12,
+    performers: [
+      { id: 'a', name: '甲', radius: 5, keys: [{ t: 0, x: 0, y: 50 }, { t: 10, x: 100, y: 50 }] },
+      { id: 'b', name: '乙', radius: 5, keys: [{ t: 0, x: 50, y: 50 }] }
+    ],
+    capacityZones: [
+      { x: 40, y: 40, width: 20, height: 20, capacity: 1 },
+      { id: 'z9', name: 'VIP 区', x: 0, y: 0, width: 10, height: 10, capacity: 2 }
+    ]
+  };
+  const r = await postAnalyze(body);
+  assert.equal(r.status, 200);
+  // 顶层与 scene 内均带规整后的 capacityZones
+  assert.ok(Array.isArray(r.json.capacityZones));
+  assert.equal(r.json.capacityZones.length, 2);
+  assert.deepEqual(r.json.scene.capacityZones, r.json.capacityZones);
+  assert.ok(r.json.capacityZones[0].id, '缺省 id 自动补全');
+  assert.equal(r.json.capacityZones[0].name, '限员区 1', '缺省 name 补序号');
+  assert.equal(r.json.capacityZones[1].id, 'z9', '显式 id 保留');
+  assert.equal(r.json.capacityZones[1].name, 'VIP 区');
+
+  assert.equal(r.json.capacityResults.length, 2);
+  const z1 = r.json.capacityResults[0];
+  // 乙全程在区，甲 t∈[4,6] 横穿 -> 超员 [4,6] 共 2 人
+  assert.equal(z1.overcrowded, true);
+  assert.equal(z1.capacity, 1);
+  assert.equal(z1.segments.length, 1);
+  assert.ok(Math.abs(z1.segments[0].start - 4) < 1e-9);
+  assert.ok(Math.abs(z1.segments[0].end - 6) < 1e-9);
+  assert.equal(z1.segments[0].count, 2);
+  assert.deepEqual(z1.segments[0].performerIds, ['b', 'a']);
+  assert.deepEqual(z1.segments[0].performerNames, ['乙', '甲']);
+  assert.ok(Math.abs(z1.firstOverflow - 4) < 1e-9);
+  assert.equal(z1.peakCount, 2);
+  // 第二区无人进入：无超员、峰值 0
+  const z2 = r.json.capacityResults[1];
+  assert.equal(z2.overcrowded, false);
+  assert.deepEqual(z2.segments, []);
+  assert.equal(z2.peakCount, 0);
+  assert.equal(z2.firstOverflow, null);
+});
+
+test('POST /api/analyze：capacityZones 同刻进出分段与零宽区域不计', async () => {
+  const body = {
+    duration: 12,
+    performers: [
+      { id: 'c', name: '丙', radius: 0, keys: [{ t: 0, x: 50, y: 50 }] },
+      { id: 'a', name: '甲', radius: 0, keys: [{ t: 0, x: 50, y: 50 }, { t: 2, x: 50, y: 50 }, { t: 4, x: 0, y: 50 }] },
+      { id: 'b', name: '乙', radius: 0, keys: [{ t: 0, x: 30, y: 50 }, { t: 2, x: 30, y: 50 }, { t: 4, x: 80, y: 50 }] }
+    ],
+    capacityZones: [
+      { x: 40, y: 40, width: 20, height: 20, capacity: 1 },
+      { x: 40, y: 40, width: 0, height: 20, capacity: 1 }
+    ]
+  };
+  const r = await postAnalyze(body);
+  assert.equal(r.status, 200);
+  const z1 = r.json.capacityResults[0];
+  // t=2.4 甲出乙进同刻换手：两段超员、名单不同、无零长度段、峰值不叠加
+  assert.equal(z1.segments.length, 2);
+  assert.deepEqual(z1.segments[0].performerIds, ['c', 'a']);
+  assert.deepEqual(z1.segments[1].performerIds, ['c', 'b']);
+  z1.segments.forEach((seg) => assert.ok(seg.end - seg.start > 1e-6, '不生成零长度超员段'));
+  assert.equal(z1.peakCount, 2);
+  // 零宽区域没有内部：永不统计
+  const z2 = r.json.capacityResults[1];
+  assert.equal(z2.overcrowded, false);
+  assert.equal(z2.peakCount, 0);
+});
+
+test('POST /api/analyze：非法 capacityZones 返回 400', async () => {
+  const base = {
+    duration: 10,
+    performers: [
+      { id: 'a', radius: 1, keys: [{ t: 0, x: 0, y: 0 }] },
+      { id: 'b', radius: 1, keys: [{ t: 0, x: 5, y: 5 }] }
+    ]
+  };
+  const zone = { x: 0, y: 0, width: 10, height: 10, capacity: 2 };
+
+  const notArray = Object.assign({ capacityZones: {} }, base);
+  let r = await postAnalyze(notArray);
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /capacityZones 必须为数组/);
+
+  const badCap = Object.assign({}, base, {
+    capacityZones: [Object.assign({}, zone, { capacity: 0 })]
+  });
+  r = await postAnalyze(badCap);
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /capacity 必须为正整数/);
+
+  const fracCap = Object.assign({}, base, {
+    capacityZones: [Object.assign({}, zone, { capacity: 1.5 })]
+  });
+  r = await postAnalyze(fracCap);
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /capacity 必须为正整数/);
+
+  const badWidth = Object.assign({}, base, {
+    capacityZones: [Object.assign({}, zone, { width: -1 })]
+  });
+  r = await postAnalyze(badWidth);
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /width\/height 不能为负/);
+
+  const badCoord = Object.assign({}, base, {
+    capacityZones: [Object.assign({}, zone, { x: 'nope' })]
+  });
+  r = await postAnalyze(badCoord);
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /限员区/);
+});
+
+test('POST /api/analyze：无 capacityZones 的旧请求保持兼容（空数组）', async () => {
+  const r = await postAnalyze({
+    duration: 10,
+    performers: [
+      { name: 'a', radius: 10, keys: [{ t: 0, x: 0, y: 0 }, { t: 10, x: 100, y: 0 }] },
+      { name: 'b', radius: 10, keys: [{ t: 0, x: 100, y: 0 }, { t: 10, x: 0, y: 0 }] }
+    ]
+  });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.capacityZones, []);
+  assert.deepEqual(r.json.capacityResults, []);
+  assert.deepEqual(r.json.scene.capacityZones, []);
+});
+

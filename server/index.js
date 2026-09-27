@@ -25,13 +25,15 @@ app.get('/api/sample', (_req, res) => {
  * 把入参场景规整为 API 出参形式：每个关键帧都带显式半径 r
  * （缺省继承的帧解析为表演者当前 radius），禁入矩形经坐标/尺寸规整，
  * 交接配置经同一规整（缺省 id 补全、尺寸/触达钳非负、最短持续必须为正），
+ * 限员区经同一规整（缺省 id/name 补全、尺寸钳非负、人数上限为正整数），
  * 便于集成方直接消费。
  */
-function resolveScene(duration, performers, obstacles, handoffs) {
+function resolveScene(duration, performers, obstacles, handoffs, capacityZones) {
   return {
     duration: duration,
     obstacles: core.normalizeObstacles(obstacles),
     handoffs: core.normalizeHandoffs(handoffs, duration),
+    capacityZones: core.normalizeCapacityZones(capacityZones),
     performers: performers.map((p) => {
       const base = Math.max(0, Number(p.radius) || 0);
       const ks = core.normalizeKeys(p.keys, base);
@@ -59,6 +61,7 @@ function resolveScene(duration, performers, obstacles, handoffs) {
  *   performers:[{name?,radius,keys:[{t,x,y,r?}],cues?:[{x,y,width,height,winStart,winEnd}]}],
  *   obstacles?:[{id?,name?,x,y,width,height}],   // 舞台禁入矩形（可空/缺省）
  *   handoffs?:[{id?,aId,bId,x,y,width,height,reach,minDuration}]  // 道具交接（可空/缺省）
+ *   capacityZones?:[{id?,name?,x,y,width,height,capacity}]  // 区域限员（可空/缺省）
  * }
  * 关键帧 r 为可选安全半径（开伞/展开道具），缺省继承表演者 radius。
  * cues 为按顺序排列的入场口令（入口矩形 + 允许进入时窗，时窗缺省为
@@ -69,11 +72,15 @@ function resolveScene(duration, performers, obstacles, handoffs) {
  * handoffResults——两人圆心同时严格位于交接区内部且间距≤reach 的
  * 连续区间（贴边停留与仅瞬时触达不计），以及每段满足 b-a≥d 时给出的
  * 起始时窗 [a, b-d]。
+ * capacityZones 为区域限员配置：轴对齐矩形 + 正整数人数上限 capacity；
+ * 返回 capacityResults——每区的超员时间段（圆心严格在区内的人数超过
+ * 上限的正持续区间，含人数与在场名单，名单变化即分段，同刻进出一并
+ * 处理，不产生零长度段）与全程峰值人数（只计有正持续时间的状态）。
  * 每对返回精确碰撞区间与最小安全余量 minMargin/minMarginT
  * （distance(t)-(rA+rB) 的连续全局最小值及发生时刻），pairs 按余量升序；
  * obstacleConflicts 为每位表演者 × 每个禁入矩形的精确侵入区间，按首次
  * 进入时刻升序；场景级另附 minMargin/minMarginT/minMarginPair 与
- * firstObstacleEntry/firstObstacleConflict。旧请求（无 obstacles/cues/handoffs）完全兼容。
+ * firstObstacleEntry/firstObstacleConflict。旧请求（无 obstacles/cues/handoffs/capacityZones）完全兼容。
  */
 app.post('/api/analyze', (req, res) => {
   try {
@@ -82,6 +89,7 @@ app.post('/api/analyze', (req, res) => {
     const performers = Array.isArray(scene.performers) ? scene.performers : [];
     const rawObstacles = scene.obstacles;
     const rawHandoffs = scene.handoffs;
+    const rawZones = scene.capacityZones;
 
     if (!(duration > 0) || !isFinite(duration)) {
       return res.status(400).json({ error: 'duration 必须为正数（秒）' });
@@ -94,6 +102,9 @@ app.post('/api/analyze', (req, res) => {
     }
     if (rawHandoffs !== undefined && rawHandoffs !== null && !Array.isArray(rawHandoffs)) {
       return res.status(400).json({ error: 'handoffs 必须为数组' });
+    }
+    if (rawZones !== undefined && rawZones !== null && !Array.isArray(rawZones)) {
+      return res.status(400).json({ error: 'capacityZones 必须为数组' });
     }
 
     performers.forEach((p, idx) => {
@@ -188,11 +199,32 @@ app.post('/api/analyze', (req, res) => {
       }
     });
 
+    // 区域限员入参校验（缺省/空数组直接跳过，保持旧请求兼容）；
+    // 缺省 id/name 由引擎规整时补全，这里仅对显式给出但非法的字段报 400
+    (rawZones || []).forEach((z, idx) => {
+      if (!z || typeof z !== 'object') {
+        throw new Error(`第 ${idx + 1} 个限员区格式非法`);
+      }
+      ['x', 'y', 'width', 'height'].forEach((f) => {
+        if (!isFinite(Number(z[f]))) {
+          throw new Error(`第 ${idx + 1} 个限员区的 ${f} 必须为有限数`);
+        }
+      });
+      if (Number(z.width) < 0 || Number(z.height) < 0) {
+        throw new Error(`第 ${idx + 1} 个限员区的 width/height 不能为负`);
+      }
+      const cap = Number(z.capacity);
+      if (!isFinite(cap) || cap < 1 || Math.floor(cap) !== cap) {
+        throw new Error(`第 ${idx + 1} 个限员区的 capacity 必须为正整数`);
+      }
+    });
+
     const obstacles = core.normalizeObstacles(rawObstacles);
     const handoffs = core.normalizeHandoffs(rawHandoffs, duration);
-    const result = core.analyzeScene({ duration, performers, obstacles, handoffs });
+    const capacityZones = core.normalizeCapacityZones(rawZones);
+    const result = core.analyzeScene({ duration, performers, obstacles, handoffs, capacityZones });
     res.json(Object.assign(
-      { scene: resolveScene(duration, performers, obstacles, handoffs) },
+      { scene: resolveScene(duration, performers, obstacles, handoffs, capacityZones) },
       result
     ));
   } catch (err) {

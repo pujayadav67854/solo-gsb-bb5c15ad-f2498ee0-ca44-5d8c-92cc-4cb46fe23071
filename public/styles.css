@@ -307,6 +307,63 @@ html, body {
 }
 .handoff-win-chip:hover { background: rgba(63, 185, 80, .3); text-decoration-style: solid; }
 
+/* 区域限员面板 */
+.panel-zones { font-variant-numeric: tabular-nums; }
+.zone-list { padding: 6px 10px; }
+.zone-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  margin-bottom: 7px;
+  background: var(--bg-panel-2);
+  border-left-width: 3px;
+  border-left-color: #2dd4bf;
+}
+.zone-row.over { border-left-color: var(--danger); }
+.zone-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+.zone-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zone-name .zone-cap-tag {
+  font-weight: 400;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.zone-del { padding: 1px 7px; line-height: 1.4; }
+.zone-del:hover { color: var(--danger); border-color: var(--danger); }
+.zone-result { margin-top: 5px; font-size: 12px; color: var(--text-dim); }
+.zone-result-line { margin-top: 2px; line-height: 1.7; }
+.zone-ok { color: #56d364; }
+.zone-warn { color: #ff8f8a; }
+.zone-peak { color: var(--text-dim); }
+.zone-peak b { color: var(--text); }
+.zone-over-chip {
+  display: inline-block;
+  font-size: 11px;
+  background: var(--danger-bg);
+  border: 1px solid rgba(248, 81, 73, .45);
+  color: #ffb3ae;
+  border-radius: 4px;
+  padding: 0 5px;
+  margin: 1px 4px 1px 0;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.zone-over-chip:hover { background: rgba(248, 81, 73, .3); text-decoration-style: solid; }
+.zone-roster { color: #e3b341; }
+
 /* 播放控制 */
 .transport { display: flex; align-items: center; gap: 8px; }
 .time-readout { color: var(--text-dim); display: flex; align-items: center; gap: 4px; }
