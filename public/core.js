@@ -81,6 +81,25 @@
  * 取交集窗；窗内两人相对位置仍是分段一次函数，|u+vt|² ≤ reach² 是首项
  * 系数非负的二次不等式，复用 solveQuadraticLE 精确求解；全部子区间经
  * mergeIntervals 合并。全程解析，不做任何离散帧抽样。
+ *
+ * ---------- 区域限员（capacity zones） ----------
+ *
+ * 场景还可携带若干限员区域 capacityZones：
+ *   { id, name, x, y, width, height, limit }
+ * limit 必须为正整数人数上限；width/height 非负（0 宽/高的退化区域没有
+ * 内部，永不统计）。对每位表演者复用圆心**严格位于矩形内部**的停留区间
+ * （与入场口令同一开区间判定：贴边、瞬时触角、零宽高区域一律不计；
+ * 跨关键帧相接的停留已合并，同一次停留同一人只计一次），把全部进入
+ * （+1）/离开（−1）时刻汇总为事件流做扫描线：
+ *
+ *   - 同一时刻（含跨段解析产生的浮点同级误差）的进出事件先合并为一组、
+ *     一并应用，组与组之间在册名单恒定——因此同刻一进一出不会产生瞬时
+ *     超员状态，也不生成零长度超员段；开场/收场的单点状态同样不计；
+ *   - 每个正持续时间的恒定状态即一段，名单一旦变化即另起一段，只保留
+ *     人数 > limit 的超员段，段内给出人数与人员名单（按场景内表演者
+ *     次序）；全程峰值人数只在有正持续时间的状态中取。
+ *
+ * 全程解析（停留区间端点由仿射开区间解出），不做任何离散帧抽样。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -498,6 +517,8 @@
    * （triggered / missed / blocked）。
    * handoffs 为规整后的交接配置，handoffResults 每项给出两人同处
    * 交接区且间距≤触达距离的连续区间与起始时窗。
+   * capacityZones 为规整后的区域限员配置，capacityResults 每项给出
+   * 按圆心严格在内部统计的超员时间段（名单变化即分段）与全程峰值人数。
    */
   function analyzeScene(scene) {
     var duration = Number(scene.duration);
@@ -581,6 +602,12 @@
       return analyzeHandoff(h, pa, pb, duration);
     });
 
+    // 区域限员：每个限员区一条超员时间段与全程峰值结果
+    var capacityZones = normalizeCapacityZones(scene.capacityZones);
+    var capacityResults = capacityZones.map(function (z) {
+      return analyzeCapacityZone(z, ps, duration);
+    });
+
     return {
       duration: duration,
       pairCount: pairs.length,
@@ -590,6 +617,8 @@
       cueResults: cueResults,
       handoffs: handoffs,
       handoffResults: handoffResults,
+      capacityZones: capacityZones,
+      capacityResults: capacityResults,
       firstObstacleEntry: firstObstacle ? firstObstacle.firstEntry : null,
       firstObstacleConflict: firstObstacle
         ? [firstObstacle.performerId, firstObstacle.obstacleId]
@@ -1143,6 +1172,189 @@
     return false;
   }
 
+  // ---------- 区域限员（capacity zones） ----------
+  //
+  // 每个限员区 { id, name, x, y, width, height, limit }：轴对齐矩形 +
+  // 正整数人数上限。统计对象是各位表演者的**圆心**：只有圆心严格位于
+  // 矩形内部（开区间判定，贴边、仅瞬时触角、0 宽/高退化区域均不计），
+  // 跨关键帧相接的连续停留合并为一次（同一人同一次停留只计一次）。
+  // 对所有人的停留区间汇总进入(+1)/离开(-1)事件后做扫描线：同刻事件
+  // 一并应用（同刻进出不产生瞬时超员、不产生零长度段），名单恒定且有
+  // 正持续时间的区间才成段；只保留人数 > limit 的段，名单变化即分段；
+  // 全程峰值只在有正持续时间的状态上取。全程解析，零采样。
+
+  var ZONE_ID_PREFIX = 'z';
+  var ZONE_EPS = 1e-7;   // 同刻进出事件归组 / 正持续时间判定容差（秒）
+
+  function nextZoneId(existing) {
+    var used = {};
+    (existing || []).forEach(function (z) { used[z.id] = true; });
+    var id;
+    do {
+      id = ZONE_ID_PREFIX + Math.random().toString(36).slice(2, 8);
+    } while (used[id]);
+    return id;
+  }
+
+  /**
+   * 规整限员区域：坐标/尺寸解析为有限数，width/height 钳为非负（0 宽/高
+   * 的退化区域没有内部，分析时永不统计）；limit 必须为正整数（有限、
+   * >0，小数向下取整），否则该项丢弃；缺省 id 自动生成，缺省 name 用
+   * "限员区 N"。返回顺序与入参一致的新数组。
+   */
+  function normalizeCapacityZones(zones) {
+    var list = Array.isArray(zones) ? zones : [];
+    var out = [];
+    list.forEach(function (raw) {
+      if (!raw || typeof raw !== 'object') return;
+      var x = Number(raw.x);
+      var y = Number(raw.y);
+      var w = Number(raw.width);
+      var h = Number(raw.height);
+      var limit = Number(raw.limit);
+      if (![x, y, w, h].every(isFinite)) return;
+      if (!(isFinite(limit) && limit > 0)) return;
+      limit = Math.floor(limit);
+      if (limit < 1) return;
+      var id = (raw.id === null || raw.id === undefined || raw.id === '')
+        ? nextZoneId(out)
+        : String(raw.id);
+      var index = out.length + 1;
+      var name = (raw.name === null || raw.name === undefined || String(raw.name).trim() === '')
+        ? '限员区 ' + index
+        : String(raw.name);
+      out.push({
+        id: id,
+        name: name,
+        x: x,
+        y: y,
+        width: Math.max(0, w),
+        height: Math.max(0, h),
+        limit: limit
+      });
+    });
+    return out;
+  }
+
+  /**
+   * 计算单个限员区域的全部在册状态与超员时间段。
+   * zone 为 normalizeCapacityZones 规整后的配置；performers 为场景演员。
+   * 返回 {
+   *   zoneId, zoneName, limit,
+   *   intervals: [{ start, end, count, members:[{id,name}] }],  // 超员段（正持续、count>limit，按开始升序）
+   *   overcrowded,              // intervals 是否非空
+   *   firstStart,               // 首个超员段起点（无则 null）
+   *   peak,                     // 全程峰值人数（只计有正持续时间的状态）
+   *   peakT,                    // 峰值状态的开始时刻（无正持续状态为 null）
+   *   peakMembers               // 峰值状态名单（无则空数组）
+   * }
+   */
+  function analyzeCapacityZone(zone, performers, duration) {
+    var durationNum = Number(duration);
+    if (!(durationNum > 0)) throw new Error('duration 必须为正数');
+    var limit = zone.limit;
+    var result = {
+      zoneId: zone.id,
+      zoneName: zone.name,
+      limit: limit,
+      intervals: [],
+      overcrowded: false,
+      firstStart: null,
+      peak: 0,
+      peakT: null,
+      peakMembers: []
+    };
+
+    // 收集全部进入(+1)/离开(-1)事件：每人各自的圆心停留区间（已合并
+    // 跨关键帧相接的停留），同一次停留同一人自然只产生一对事件
+    var events = [];
+    (performers || []).forEach(function (p) {
+      var stays = rectangleStayIntervals(p, zone, durationNum);
+      stays.forEach(function (iv) {
+        events.push({ t: iv[0], delta: 1, performer: p });
+        events.push({ t: iv[1], delta: -1, performer: p });
+      });
+    });
+    events.sort(function (a, b) {
+      return a.t - b.t || (b.delta - a.delta); // 时刻相同仅为稳定次序，仍按组一并应用
+    });
+
+    var present = {}; // performerId -> { id, name }
+    var segStart = 0;
+    var segMembers = [];
+
+    function memberList() {
+      // 名单按场景内表演者次序给出，便于稳定展示与断言
+      var list = [];
+      (performers || []).forEach(function (p) {
+        if (present[p.id]) list.push({ id: p.id, name: p.name || p.id });
+      });
+      return list;
+    }
+
+    // 关闭 [segStart, t) 状态：只统计有正持续时间的恒定状态
+    function closeSegment(t) {
+      if (t - segStart > ZONE_EPS) {
+        var members = segMembers;
+        var count = members.length;
+        if (count > limit) {
+          result.intervals.push({
+            start: segStart,
+            end: t,
+            count: count,
+            members: members.map(function (m) { return { id: m.id, name: m.name }; })
+          });
+        }
+        if (count > result.peak) {
+          result.peak = count;
+          result.peakT = segStart;
+          result.peakMembers = members.map(function (m) { return { id: m.id, name: m.name }; });
+        }
+      }
+    }
+
+    var i = 0;
+    while (i < events.length) {
+      var t = events[i].t;
+      // 前一组状态在 [segStart, t) 上恒定（开场即进入的事件在 t=0，
+      // closeSegment(0) 为零持续、自动跳过）
+      closeSegment(t);
+      // 同一时刻的全部进出（含跨段解析的浮点同级端点）一并应用：
+      // 一进一出互相抵消，不产生瞬时超员也不产生零长度段
+      var j = i;
+      while (j < events.length &&
+             Math.abs(events[j].t - t) <= ZONE_EPS + MERGE_REL * Math.max(Math.abs(t), 1)) {
+        var ev = events[j];
+        if (ev.delta > 0) {
+          if (!present[ev.performer.id]) {
+            present[ev.performer.id] = { id: ev.performer.id, name: ev.performer.name || ev.performer.id };
+          }
+        } else {
+          delete present[ev.performer.id];
+        }
+        j++;
+      }
+      segStart = t;
+      segMembers = memberList();
+      i = j;
+    }
+    closeSegment(durationNum); // 收场前最后一个恒定状态（零持续自动跳过）
+
+    result.overcrowded = result.intervals.length > 0;
+    result.firstStart = result.intervals.length ? result.intervals[0].start : null;
+    return result;
+  }
+
+  /** 查询时刻 t 某限员结果是否处于超员段内（供画布高亮）。 */
+  function isCapacityOverAt(result, t) {
+    if (!result || !result.intervals) return false;
+    for (var i = 0; i < result.intervals.length; i++) {
+      var iv = result.intervals[i];
+      if (t + EPS >= iv.start && t - EPS <= iv.end) return true;
+    }
+    return false;
+  }
+
   // ---------- 方案快照：两场景对比 ----------
 
   var DIFF_EPS = 1e-6;   // 区间端点"时间变化"判定容差（秒）
@@ -1434,6 +1646,9 @@
    *  - 另附一项**道具交接**：甲×乙、中央交接区（与禁入区同框，语义不同），
    *    触达距离 80、最短持续 0.5s；两人圆心同时严格在区内且间距≤80 的
    *    区间约为 [5.18, 6.82]，给出起始时窗 [5.18, 6.32]。
+   *  - 另附一个**区域限员**：中央限员区（与交接区同框，语义不同）上限
+   *    1 人；甲、乙圆心同时在内部的约 [5.18, 6.82] 为唯一超员段，
+   *    峰值 2 人，丙、丁从不进入。
    */
   function builtinScene() {
     return {
@@ -1454,6 +1669,12 @@
           reach: 80,
           minDuration: 0.5
         }
+      ],
+      // 中央区域限员 1 人：甲（横贯）与乙（纵穿）圆心同时严格位于
+      // (440,560)×(240,360) 内的时段约为 t∈[5.18, 6.82]，构成唯一超员段，
+      // 全程峰值 2 人；丙、丁的错峰折线圆心从不进入该区域内部。
+      capacityZones: [
+        { id: 'z1', name: '中央限员区', x: 440, y: 240, width: 120, height: 120, limit: 1 }
       ],
       performers: [
         {
@@ -1531,6 +1752,9 @@
     normalizeHandoffs: normalizeHandoffs,
     analyzeHandoff: analyzeHandoff,
     isHandoffActive: isHandoffActive,
+    normalizeCapacityZones: normalizeCapacityZones,
+    analyzeCapacityZone: analyzeCapacityZone,
+    isCapacityOverAt: isCapacityOverAt,
     compareScenes: compareScenes,
     builtinScene: builtinScene
   };

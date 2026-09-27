@@ -10,6 +10,8 @@
   var KEY_HIT_PX = 9;      // 走位点命中半径（屏幕像素）
   var TICK_HIT_PX = 7;     // 时间轴时刻柄命中半径
   var NEW_OBS_SIZE = 120;  // 单击画布新增禁入矩形的默认边长
+  var NEW_ZONE_SIZE = 120; // 单击画布新增限员矩形的默认边长
+  var ZONE_LIMIT_DEFAULT = 2; // 新增限员区域的默认人数上限
 
   var canvas = document.getElementById('stage');
   var ctx = canvas.getContext('2d');
@@ -21,10 +23,13 @@
     performers: [],
     obstacles: [],
     handoffs: [],
+    capacityZones: [],
     selectedPid: null,
     selectedKey: null,      // {pid, index}
     selectedObstacleId: null,
+    selectedZoneId: null,
     addObstacleMode: false, // 下一次在画布拖出/单击投放禁入矩形
+    addZoneMode: false,     // 下一次在画布拖出/单击投放限员矩形
     time: 0,
     playing: false,
     speed: 1,
@@ -47,6 +52,10 @@
 
   function getObstacle(oid) {
     return state.obstacles.find(function (o) { return o.id === oid; }) || null;
+  }
+
+  function getZone(zid) {
+    return state.capacityZones.find(function (z) { return z.id === zid; }) || null;
   }
 
   // ---------- 场景装载 ----------
@@ -99,16 +108,27 @@
       h.minDuration = Math.round(h.minDuration * 100) / 100;
       return h;
     });
+    // 区域限员经引擎同一规整（缺省 id/name 补全、尺寸钳非负、上限取正整数）
+    state.capacityZones = Core.normalizeCapacityZones(scene.capacityZones).map(function (z) {
+      z.x = Math.round(z.x);
+      z.y = Math.round(z.y);
+      z.width = Math.round(z.width);
+      z.height = Math.round(z.height);
+      return z;
+    });
     state.selectedPid = state.performers[0] ? state.performers[0].id : null;
     state.selectedKey = null;
     state.selectedObstacleId = null;
+    state.selectedZoneId = null;
     state.activePairKey = null;
     setAddObstacleMode(false);
+    setAddZoneMode(false);
     state.time = opts.keepTime ? Math.min(state.time, state.duration) : 0;
     state.playing = false;
     document.getElementById('duration-input').value = state.duration;
     recompute();
     renderPerformers();
+    renderZones();
     renderTimelineStatic();
     draw();
   }
@@ -138,13 +158,15 @@
       duration: state.duration,
       performers: state.performers,
       obstacles: state.obstacles,
-      handoffs: state.handoffs
+      handoffs: state.handoffs,
+      capacityZones: state.capacityZones
     });
     renderSummary();
     renderPairs();
     renderObstacleResults();
     renderCueResults();
     renderHandoffResults();
+    renderZoneResults();
     renderTimelineDanger();
     updatePlayhead();
     refreshSnapshotDiff(); // 编辑场景后立即刷新方案对比
@@ -174,6 +196,17 @@
       var o = state.obstacles[i];
       if (wx >= o.x && wx <= o.x + o.width && wy >= o.y && wy <= o.y + o.height) {
         return o;
+      }
+    }
+    return null;
+  }
+
+  function hitTestZone(wx, wy) {
+    // 限员区与禁入区分开命中；后加的在上层
+    for (var i = state.capacityZones.length - 1; i >= 0; i--) {
+      var z = state.capacityZones[i];
+      if (wx >= z.x && wx <= z.x + z.width && wy >= z.y && wy <= z.y + z.height) {
+        return z;
       }
     }
     return null;
@@ -221,9 +254,42 @@
       return;
     }
 
+    // 限员区新增模式：拖出矩形（单击则投放默认尺寸）
+    if (state.addZoneMode) {
+      state.drag = {
+        type: 'zone-new',
+        x0: w.x,
+        y0: w.y,
+        x1: w.x,
+        y1: w.y,
+        moved: false
+      };
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+
+    var hitZone = hitTestZone(w.x, w.y);
+    if (hitZone) {
+      state.selectedZoneId = hitZone.id;
+      state.selectedObstacleId = null;
+      state.selectedKey = null;
+      state.drag = {
+        type: 'zone',
+        zid: hitZone.id,
+        offX: w.x - hitZone.x,
+        offY: w.y - hitZone.y,
+        moved: false
+      };
+      canvas.setPointerCapture(e.pointerId);
+      renderZones();
+      draw();
+      return;
+    }
+
     var hitObs = hitTestObstacle(w.x, w.y);
     if (hitObs) {
       state.selectedObstacleId = hitObs.id;
+      state.selectedZoneId = null;
       state.selectedKey = null;
       state.drag = {
         type: 'obstacle',
@@ -243,6 +309,7 @@
       state.selectedPid = hit.pid;
       state.selectedKey = { pid: hit.pid, index: hit.index };
       state.selectedObstacleId = null;
+      state.selectedZoneId = null;
       var p = getPerformer(hit.pid);
       state.drag = {
         type: 'key',
@@ -257,6 +324,7 @@
     } else if (state.selectedPid) {
       // 空白按下：准备新增走位点（pointerup 未移动则加入）
       state.selectedObstacleId = null;
+      state.selectedZoneId = null;
       state.drag = { type: 'new', x: w.x, y: w.y, moved: false };
       canvas.setPointerCapture(e.pointerId);
       draw();
@@ -273,6 +341,28 @@
       }
       state.drag.x1 = w.x;
       state.drag.y1 = w.y;
+      draw();
+      return;
+    }
+
+    if (state.drag && state.drag.type === 'zone-new') {
+      if (Math.abs(w.x - state.drag.x0) * v.sx > 4 || Math.abs(w.y - state.drag.y0) * v.sy > 4) {
+        state.drag.moved = true;
+      }
+      state.drag.x1 = w.x;
+      state.drag.y1 = w.y;
+      draw();
+      return;
+    }
+
+    if (state.drag && state.drag.type === 'zone') {
+      var z = getZone(state.drag.zid);
+      if (!z) return;
+      state.drag.moved = true;
+      z.x = clamp(Math.round(w.x - state.drag.offX), 0, Math.max(0, WORLD_W - z.width));
+      z.y = clamp(Math.round(w.y - state.drag.offY), 0, Math.max(0, WORLD_H - z.height));
+      recompute();
+      renderZones();
       draw();
       return;
     }
@@ -308,14 +398,25 @@
     }
 
     // 悬停命中提示
-    if (state.addObstacleMode) {
+    if (state.addObstacleMode || state.addZoneMode) {
       canvas.style.cursor = 'crosshair';
       tooltip.hidden = true;
       return;
     }
+    var hoverZone = hitTestZone(w.x, w.y);
     var hoverObs = hitTestObstacle(w.x, w.y);
     var hover = hitTestKey(w.x, w.y);
-    if (hoverObs) {
+    if (hoverZone) {
+      canvas.style.cursor = 'move';
+      var zover = currentCapacityState(state.time)[hoverZone.id];
+      var zlabel = hoverZone.name + ' · 限员矩形 (' + Math.round(hoverZone.x) + ', ' +
+        Math.round(hoverZone.y) + ') ' + Math.round(hoverZone.width) + '×' + Math.round(hoverZone.height) +
+        ' · 上限 ' + hoverZone.limit +
+        (zover ? ' · 当前 ' + zover.count + ' 人' + (zover.over ? '（超员）' : '') : ' · 拖动移位 · 右键删除');
+      tooltip.hidden = false;
+      tooltip.textContent = zlabel;
+      positionTooltip(e);
+    } else if (hoverObs) {
       canvas.style.cursor = 'move';
       var intruders = currentObstacleIntruders(state.time)[hoverObs.id];
       tooltip.hidden = false;
@@ -351,6 +452,15 @@
         // 单击：以落点附近为左上角投放默认尺寸矩形（自动收回画布内）
         addObstacleRect(w2.x, w2.y, w2.x + NEW_OBS_SIZE, w2.y + NEW_OBS_SIZE);
       }
+    } else if (drag.type === 'zone-new') {
+      var wz = toWorld(e.clientX, e.clientY);
+      if (drag.moved) {
+        addZoneRect(drag.x0, drag.y0, wz.x, wz.y);
+      } else {
+        // 单击：以落点为中心投放默认尺寸限员矩形（自动收回画布内）
+        addZoneRect(wz.x - NEW_ZONE_SIZE / 2, wz.y - NEW_ZONE_SIZE / 2,
+          wz.x + NEW_ZONE_SIZE / 2, wz.y + NEW_ZONE_SIZE / 2);
+      }
     } else if (drag.type === 'new' && !drag.moved && state.selectedPid) {
       var w3 = toWorld(e.clientX, e.clientY);
       addKey(state.selectedPid, state.time, w3.x, w3.y);
@@ -369,17 +479,23 @@
 
   // 双击空白：在当前播放时刻为选中者加帧（与单击新增并存，双击更直观）
   canvas.addEventListener('dblclick', function (e) {
-    if (state.addObstacleMode || !state.selectedPid) return;
+    if (state.addObstacleMode || state.addZoneMode || !state.selectedPid) return;
     var w = toWorld(e.clientX, e.clientY);
+    if (hitTestZone(w.x, w.y)) return;
     if (hitTestObstacle(w.x, w.y)) return;
     if (hitTestKey(w.x, w.y)) return;
     addKey(state.selectedPid, state.time, w.x, w.y);
   });
 
-  // 右键圆点：删除该走位点（每人保留至少 1 帧）；右键禁入矩形：删除该矩形
+  // 右键圆点：删除该走位点（每人保留至少 1 帧）；右键矩形：删除对应区域
   canvas.addEventListener('contextmenu', function (e) {
     e.preventDefault();
     var w = toWorld(e.clientX, e.clientY);
+    var hitZoneRect = hitTestZone(w.x, w.y);
+    if (hitZoneRect) {
+      removeZone(hitZoneRect.id);
+      return;
+    }
     var hitObs = hitTestObstacle(w.x, w.y);
     if (hitObs) {
       removeObstacle(hitObs.id);
@@ -521,6 +637,7 @@
     btnObstacle.classList.toggle('active', state.addObstacleMode);
     btnObstacle.textContent = state.addObstacleMode ? '✕ 取消禁入区' : '＋ 禁入区';
     canvas.style.cursor = state.addObstacleMode ? 'crosshair' : '';
+    if (on && state.addZoneMode) setAddZoneMode(false);
   }
 
   btnObstacle.addEventListener('click', function () {
@@ -608,6 +725,177 @@
   oeHeightInput.addEventListener('change', commitObstacleSize);
   oeDeleteBtn.addEventListener('click', function () {
     if (state.selectedObstacleId) removeObstacle(state.selectedObstacleId);
+  });
+
+  // ---------- 区域限员：新增 / 删除 / 编辑 ----------
+  var btnZone = document.getElementById('btn-zone');
+  var zoneEditorEl = document.getElementById('zone-editor');
+  var zeInfoEl = document.getElementById('ze-info');
+  var zeNameInput = document.getElementById('ze-name');
+  var zeXInput = document.getElementById('ze-x');
+  var zeYInput = document.getElementById('ze-y');
+  var zeWidthInput = document.getElementById('ze-width');
+  var zeHeightInput = document.getElementById('ze-height');
+  var zeLimitInput = document.getElementById('ze-limit');
+  var zeDeleteBtn = document.getElementById('ze-delete');
+
+  function setAddZoneMode(on) {
+    state.addZoneMode = !!on;
+    btnZone.classList.toggle('active', state.addZoneMode);
+    btnZone.textContent = state.addZoneMode ? '✕ 取消限员区' : '＋ 限员区';
+    canvas.style.cursor = state.addZoneMode ? 'crosshair' : '';
+    if (on && state.addObstacleMode) setAddObstacleMode(false);
+  }
+
+  btnZone.addEventListener('click', function () {
+    setAddZoneMode(!state.addZoneMode);
+  });
+
+  // 由画布两对角点新增限员矩形（坐标取整、收回画布内；过小拖框视为单击）
+  function addZoneRect(x0, y0, x1, y1) {
+    var x = clamp(Math.round(Math.min(x0, x1)), 0, WORLD_W);
+    var y = clamp(Math.round(Math.min(y0, y1)), 0, WORLD_H);
+    var right = clamp(Math.round(Math.max(x0, x1)), 0, WORLD_W);
+    var bottom = clamp(Math.round(Math.max(y0, y1)), 0, WORLD_H);
+    var width = right - x;
+    var height = bottom - y;
+    // 极小拖框：视为默认尺寸，以落点为中心收回画布内
+    if (width < 4 || height < 4) {
+      width = NEW_ZONE_SIZE;
+      height = NEW_ZONE_SIZE;
+      x = clamp(x - Math.round(NEW_ZONE_SIZE / 2), 0, WORLD_W - width);
+      y = clamp(y - Math.round(NEW_ZONE_SIZE / 2), 0, WORLD_H - height);
+    }
+    var normalized = Core.normalizeCapacityZones([{
+      x: x, y: y, width: width, height: height, limit: ZONE_LIMIT_DEFAULT
+    }])[0];
+    state.capacityZones.push(normalized);
+    state.selectedZoneId = normalized.id;
+    state.selectedObstacleId = null;
+    state.selectedKey = null;
+    setAddZoneMode(false);
+    zoneAfterStructuralChange();
+  }
+
+  function addZoneDefault() {
+    // 面板按钮：在舞台中央附近投放默认尺寸（略微错开避免完全重叠）
+    var n = state.capacityZones.length;
+    var size = NEW_ZONE_SIZE;
+    var x = clamp(Math.round((WORLD_W - size) / 2 + (n % 4) * 24 - 36), 0, WORLD_W - size);
+    var y = clamp(Math.round((WORLD_H - size) / 2 + (n % 4) * 24 - 36), 0, WORLD_H - size);
+    var normalized = Core.normalizeCapacityZones([{
+      x: x, y: y, width: size, height: size, limit: ZONE_LIMIT_DEFAULT
+    }])[0];
+    state.capacityZones.push(normalized);
+    state.selectedZoneId = normalized.id;
+    state.selectedObstacleId = null;
+    state.selectedKey = null;
+    zoneAfterStructuralChange();
+  }
+
+  function removeZone(zid) {
+    state.capacityZones = state.capacityZones.filter(function (z) { return z.id !== zid; });
+    if (state.selectedZoneId === zid) state.selectedZoneId = null;
+    zoneAfterStructuralChange();
+  }
+
+  function zoneAfterStructuralChange() {
+    recompute();
+    renderZones();
+    draw();
+  }
+
+  function getSelectedZone() {
+    if (!state.selectedZoneId) return null;
+    return getZone(state.selectedZoneId);
+  }
+
+  function renderZoneEditor() {
+    var z = getSelectedZone();
+    if (!z) {
+      zoneEditorEl.hidden = true;
+      return;
+    }
+    zoneEditorEl.hidden = false;
+    zeInfoEl.textContent = z.name + ' · (' + Math.round(z.x) + ', ' + Math.round(z.y) + ')';
+    if (document.activeElement !== zeNameInput) zeNameInput.value = z.name;
+    if (document.activeElement !== zeXInput) zeXInput.value = Math.round(z.x);
+    if (document.activeElement !== zeYInput) zeYInput.value = Math.round(z.y);
+    if (document.activeElement !== zeWidthInput) zeWidthInput.value = Math.round(z.width);
+    if (document.activeElement !== zeHeightInput) zeHeightInput.value = Math.round(z.height);
+    if (document.activeElement !== zeLimitInput) zeLimitInput.value = z.limit;
+  }
+
+  function commitZoneGeometry() {
+    var z = getSelectedZone();
+    if (!z) return;
+    var fields = [
+      [zeXInput, 'x'], [zeYInput, 'y'],
+      [zeWidthInput, 'width'], [zeHeightInput, 'height']
+    ];
+    // 只提交正在编辑的字段；留空/非法的字段保持原值
+    fields.forEach(function (pair) {
+      var input = pair[0];
+      var field = pair[1];
+      if (input.value === '') return;
+      var v = Number(input.value);
+      if (!isFinite(v) || v < 0) return;
+      v = Math.round(v);
+      if (field === 'x') z.x = clamp(v, 0, Math.max(0, WORLD_W - z.width));
+      else if (field === 'y') z.y = clamp(v, 0, Math.max(0, WORLD_H - z.height));
+      else if (field === 'width') z.width = clamp(v, 0, Math.max(0, WORLD_W - z.x));
+      else z.height = clamp(v, 0, Math.max(0, WORLD_H - z.y));
+    });
+    // 再次规整兜底（保留已生成 id 与 limit）
+    state.capacityZones = Core.normalizeCapacityZones(state.capacityZones);
+    recompute();
+    renderZones();
+    draw();
+  }
+
+  [zeXInput, zeYInput, zeWidthInput, zeHeightInput].forEach(function (input) {
+    input.addEventListener('change', commitZoneGeometry);
+  });
+
+  zeLimitInput.addEventListener('change', function () {
+    var z = getSelectedZone();
+    if (!z) return;
+    var v = Number(zeLimitInput.value);
+    if (isFinite(v) && v >= 1 && Math.floor(v) === v) {
+      z.limit = Math.min(999, Math.floor(v));
+      state.capacityZones = Core.normalizeCapacityZones(state.capacityZones);
+      recompute();
+      renderZones();
+      draw();
+    } else {
+      // 非正整数：回退显示为当前有效值
+      zeLimitInput.value = z.limit;
+    }
+  });
+
+  zeNameInput.addEventListener('change', function () {
+    var z = getSelectedZone();
+    if (!z) return;
+    z.name = zeNameInput.value.trim() || z.name;
+    state.capacityZones = Core.normalizeCapacityZones(state.capacityZones);
+    recompute();
+    renderZones();
+    draw();
+  });
+  zeNameInput.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+
+  function zoneRowEl(zid) {
+    return zoneListEl.querySelector('.zone-row[data-zid="' + zid + '"]') || null;
+  }
+
+  // 行内数字输入按出现顺序为 x/y/宽/高/上限，取第 5 个即人数上限
+  function zoneLimitInput(rowEl) {
+    var nums = rowEl.querySelectorAll('input[type="number"]');
+    return nums.length >= 5 ? nums[4] : null;
+  }
+
+  zeDeleteBtn.addEventListener('click', function () {
+    if (state.selectedZoneId) removeZone(state.selectedZoneId);
   });
 
   // ---------- 入场口令面板（随表演者选中切换） ----------
@@ -1102,6 +1390,248 @@
 
   handoffAddBtn.addEventListener('click', addHandoff);
 
+  // ---------- 区域限员面板 ----------
+  var zoneListEl = document.getElementById('zone-list');
+  var zoneEmptyEl = document.getElementById('zone-empty');
+  var zoneAddBtn = document.getElementById('btn-zone-add');
+
+  function capacityResultById(zid) {
+    if (!state.analysis) return null;
+    return state.analysis.capacityResults.find(function (r) { return r.zoneId === zid; }) || null;
+  }
+
+  // 时刻 t 各限员区的在册状态：{ zoneId: { count, members, over } }（供画布与悬停）
+  function currentCapacityState(t) {
+    var map = {};
+    if (!state.analysis) return map;
+    state.analysis.capacityResults.forEach(function (r) {
+      // 以成员圆心位置重新做严格内部判定：状态段端点（边界时刻）不计在册，
+      // 与引擎"圆心严格在内部"的口径保持一致
+      var members = state.performers.filter(function (p) {
+        var z = getZone(r.zoneId);
+        if (!z || !(z.width > 0 && z.height > 0)) return false;
+        var st = Core.stateAt(p.keys, t, p.radius);
+        return st.x > z.x + Core.EPS && st.x < z.x + z.width - Core.EPS &&
+          st.y > z.y + Core.EPS && st.y < z.y + z.height - Core.EPS;
+      }).map(function (p) { return { id: p.id, name: p.name }; });
+      var z = getZone(r.zoneId);
+      map[r.zoneId] = {
+        count: members.length,
+        members: members,
+        over: !!z && members.length > z.limit
+      };
+    });
+    return map;
+  }
+
+  function zoneResultHtml(z, res) {
+    if (!res) return '<span class="zone-warn">—</span>';
+    if (!(z.width > 0 && z.height > 0)) {
+      return '<span class="zone-warn">零宽 / 零高区域没有内部，永不统计</span>';
+    }
+    var html = '<div class="zone-result-line zone-peak">全程峰值 <b>' + res.peak +
+      ' 人</b>' + (res.peakT !== null ? '（自 ' + fmt(res.peakT) + ' s 起）' : '') +
+      ' · 上限 ' + z.limit + ' 人</div>';
+    if (res.peakMembers.length) {
+      html += '<div class="zone-result-line">峰值名单 ' +
+        res.peakMembers.map(function (m) {
+          return '<span class="zone-member-tag">' + escapeHtml(m.name) + '</span>';
+        }).join('') + '</div>';
+    }
+    if (!res.intervals.length) {
+      html += '<div class="zone-result-line"><span class="zone-ok">全程未超员</span></div>';
+      return html;
+    }
+    html += '<div class="zone-result-line">超员时段 ' + res.intervals.length + ' 段：</div>';
+    res.intervals.forEach(function (iv) {
+      html += '<div class="zone-result-line">' +
+        '<span class="zone-over-chip" data-t="' + iv.start +
+        '" title="点击跳转播放头到超员起点 ' + fmt(iv.start) + ' s">' +
+        fmt(iv.start) + '–' + fmt(iv.end) + ' s</span>' +
+        '<b>' + iv.count + ' 人</b>（超 ' + (iv.count - z.limit) + '）：' +
+        '<span class="zone-members">' +
+        iv.members.map(function (m) {
+          var p = getPerformer(m.id);
+          return '<span class="zone-member-tag" style="' +
+            (p ? 'border-color:' + p.color + '66;color:' + p.color + ';' : '') + '">' +
+            escapeHtml(m.name) + '</span>';
+        }).join('') +
+        '</span></div>';
+    });
+    return html;
+  }
+
+  // 只更新结果区（拖动走位等高频重算时不重建输入框，避免打断编辑）
+  function renderZoneResults() {
+    Array.prototype.forEach.call(zoneListEl.querySelectorAll('.zone-row'), function (row) {
+      var z = state.capacityZones.find(function (x) { return x.id === row.dataset.zid; });
+      var resultEl = row.querySelector('.zone-result');
+      if (!z || !resultEl) return;
+      var res = capacityResultById(z.id);
+      resultEl.innerHTML = zoneResultHtml(z, res);
+      row.classList.toggle('over', !!(res && res.overcrowded));
+      row.classList.toggle('degenerate', !(z.width > 0 && z.height > 0));
+    });
+  }
+
+  function renderZones() {
+    zoneListEl.innerHTML = '';
+    if (!state.capacityZones.length) {
+      zoneEmptyEl.hidden = false;
+      zoneEmptyEl.textContent = '尚无限员区域：点「＋ 新增限员区」（或顶部「＋ 限员区」在画布拖框），' +
+        '再逐项改坐标 / 非负宽高 / 正整数人数上限。';
+      return;
+    }
+    zoneEmptyEl.hidden = true;
+
+    state.capacityZones.forEach(function (z) {
+      var row = document.createElement('div');
+      row.className = 'zone-row';
+      row.dataset.zid = z.id;
+
+      var head = document.createElement('div');
+      head.className = 'zone-row-head';
+      var name = document.createElement('input');
+      name.type = 'text';
+      name.className = 'zone-name-input';
+      name.value = z.name;
+      name.title = '限员区域名称';
+      name.addEventListener('change', function () {
+        z.name = name.value.trim() || z.name;
+        state.capacityZones = Core.normalizeCapacityZones(state.capacityZones);
+        recompute();
+        renderZones();
+        draw();
+      });
+      name.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+      head.appendChild(name);
+
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'btn btn-mini zone-del';
+      del.textContent = '✕';
+      del.title = '删除该限员区域';
+      del.addEventListener('click', function (e) {
+        e.stopPropagation();
+        removeZone(z.id);
+      });
+      head.appendChild(del);
+      row.appendChild(head);
+
+      var fields = document.createElement('div');
+      fields.className = 'cue-fields';
+      var geo = document.createElement('span');
+      geo.className = 'cue-field-group';
+      geo.appendChild(label('x'));
+      geo.appendChild(zoneNumInput(z, 'x'));
+      geo.appendChild(label('y'));
+      geo.appendChild(zoneNumInput(z, 'y'));
+      geo.appendChild(label('宽'));
+      geo.appendChild(zoneNumInput(z, 'width'));
+      geo.appendChild(label('高'));
+      geo.appendChild(zoneNumInput(z, 'height'));
+      var cap = document.createElement('span');
+      cap.className = 'cue-field-group';
+      cap.appendChild(label('上限'));
+      cap.appendChild(zoneNumInput(z, 'limit', { min: 1, wide: true }));
+      cap.appendChild(document.createTextNode('人'));
+      fields.appendChild(geo);
+      fields.appendChild(cap);
+      row.appendChild(fields);
+
+      var result = document.createElement('div');
+      result.className = 'zone-result';
+      row.appendChild(result);
+
+      row.addEventListener('click', function () {
+        state.selectedZoneId = z.id;
+        state.selectedObstacleId = null;
+        state.selectedKey = null;
+        // 只切换选中样式，不重建列表（避免抹掉本次点击事件中的目标节点）
+        markSelectedZoneRows();
+        draw();
+      });
+
+      zoneListEl.appendChild(row);
+    });
+    renderZoneResults();
+    markSelectedZoneRows();
+  }
+
+  function markSelectedZoneRows() {
+    Array.prototype.forEach.call(zoneListEl.querySelectorAll('.zone-row'), function (row) {
+      row.classList.toggle('selected', row.dataset.zid === state.selectedZoneId);
+    });
+  }
+
+  function zoneNumInput(z, field, opts) {
+    opts = opts || {};
+    var input = document.createElement('input');
+    input.type = 'number';
+    input.className = 'cue-num' + (opts.wide ? ' cue-num-wide' : '');
+    input.value = z[field];
+    input.step = '1';
+    if (opts.min !== undefined) input.min = opts.min;
+    input.addEventListener('change', function () {
+      commitZoneField(z.id, field, input.value);
+    });
+    input.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+    return input;
+  }
+
+  function commitZoneField(zid, field, rawValue) {
+    var z = state.capacityZones.find(function (x) { return x.id === zid; });
+    if (!z) return;
+    if (rawValue === '') return; // 输入中间态：保留原值
+    var v = Number(rawValue);
+    if (!isFinite(v)) return;
+    if (field === 'x') {
+      z.x = clamp(Math.round(v), 0, Math.max(0, WORLD_W - z.width));
+    } else if (field === 'y') {
+      z.y = clamp(Math.round(v), 0, Math.max(0, WORLD_H - z.height));
+    } else if (field === 'width') {
+      if (v < 0) return;
+      z.width = clamp(Math.round(v), 0, Math.max(0, WORLD_W - z.x));
+    } else if (field === 'height') {
+      if (v < 0) return;
+      z.height = clamp(Math.round(v), 0, Math.max(0, WORLD_H - z.y));
+    } else if (field === 'limit') {
+      if (!(v >= 1) || Math.floor(v) !== v) {
+        // 非正整数人数上限：回退显示为当前有效值（保持事件循环内输入框仍在文档中）
+        setTimeout(function () {
+          var rowEl = zoneRowEl(zid);
+          var input = rowEl ? zoneLimitInput(rowEl) : null;
+          if (input) input.value = z.limit;
+        }, 0);
+        return;
+      }
+      z.limit = Math.min(999, Math.floor(v));
+    }
+    state.capacityZones = Core.normalizeCapacityZones(state.capacityZones);
+    recompute();
+    renderZones();
+    draw();
+  }
+
+  // 点击超员时段芯片：播放头跳到超员起点（事件委托；芯片点击后继续冒泡到
+  // 行仅做选中，不影响跳转）
+  zoneListEl.addEventListener('click', function (e) {
+    var el = e.target && typeof e.target.closest === 'function'
+      ? e.target.closest('.zone-over-chip') : null;
+    if (!el || !zoneListEl.contains(el)) return;
+    var t = Number(el.getAttribute('data-t'));
+    if (isFinite(t)) seek(t);
+  });
+
+  // 行内输入框点击不应触发行选中
+  Array.prototype.forEach.call(zoneListEl.querySelectorAll('input'), function (input) {
+    input.addEventListener('click', function (e) { e.stopPropagation(); });
+  });
+
+  zoneAddBtn.addEventListener('click', function () {
+    addZoneDefault();
+  });
+
   // ---------- 画布绘制 ----------
   function draw() {
     ctx.clearRect(0, 0, WORLD_W, WORLD_H);
@@ -1112,6 +1642,12 @@
     var obsIntrude = currentObstacleIntruders(t);
     Object.keys(obsIntrude).forEach(function (oid) {
       obsIntrude[oid].forEach(function (pid) { dangerIds[pid] = true; });
+    });
+    var capState = currentCapacityState(t);
+    Object.keys(capState).forEach(function (zid) {
+      capState[zid].members.forEach(function (m) {
+        if (capState[zid].over) dangerIds[m.id] = true;
+      });
     });
 
     // 路径折线
@@ -1136,6 +1672,12 @@
     // 道具交接区（紫色虚线框，当前处于可交接区间时高亮并连线双方）
     drawHandoffs(t);
 
+    // 区域限员矩形（青色虚线框，当前超员时变红并列出在册人员）
+    state.capacityZones.forEach(function (z) {
+      drawCapacityZone(z, capState[z.id]);
+    });
+    drawZoneDraft();
+
     // 入场口令矩形：只画当前选中表演者（边框颜色 = 触发状态）
     state.performers.forEach(function (p) {
       if (p.id === state.selectedPid) drawCues(p);
@@ -1154,6 +1696,7 @@
 
     renderKeyEditor();
     renderObstacleEditor();
+    renderZoneEditor();
     updateObstacleResultActive(t);
   }
 
@@ -1398,6 +1941,65 @@
     ctx.restore();
   }
 
+  // ---------- 区域限员矩形绘制 ----------
+  function drawCapacityZone(z, cap) {
+    var over = !!(cap && cap.over);
+    var selected = z.id === state.selectedZoneId;
+    var degenerate = !(z.width > 0 && z.height > 0);
+    ctx.save();
+    ctx.fillStyle = over ? 'rgba(248,81,73,0.20)'
+      : (cap && cap.count > 0) ? 'rgba(45,212,191,0.12)' : 'rgba(45,212,191,0.06)';
+    ctx.fillRect(z.x, z.y, z.width, z.height);
+
+    ctx.setLineDash(over ? [] : [8, 5]);
+    ctx.lineWidth = over ? 3 : (selected ? 2.5 : 1.5);
+    ctx.strokeStyle = over ? '#f85149'
+      : selected ? '#5eead4' : 'rgba(45,212,191,0.8)';
+    ctx.strokeRect(z.x + 0.5, z.y + 0.5, Math.max(0, z.width - 1), Math.max(0, z.height - 1));
+    ctx.setLineDash([]);
+
+    // 名称与上限 / 当前人数
+    ctx.font = 'bold 12px system-ui, sans-serif';
+    ctx.fillStyle = over ? '#ff8f8a' : '#99f6e4';
+    var label = '▦ ' + z.name + ' · 上限 ' + z.limit +
+      (cap ? ' · 当前 ' + cap.count + ' 人' : '');
+    ctx.fillText(label, z.x + 8, z.y + 18);
+    if (degenerate) {
+      ctx.font = '11px system-ui, sans-serif';
+      ctx.fillStyle = '#e3b341';
+      ctx.fillText('⚠ 零宽/高：没有内部，永不统计', z.x + 8, z.y + (z.height > 20 ? z.height - 8 : 34));
+    } else if (over) {
+      var names = cap.members.map(function (m) {
+        var p = getPerformer(m.id);
+        return p ? p.name : m.name;
+      }).join('、');
+      ctx.font = '11px system-ui, sans-serif';
+      ctx.fillStyle = '#ffb3ae';
+      ctx.fillText('⚠ 超员 ' + cap.count + '（限 ' + z.limit + '）：' + names,
+        z.x + 8, z.y + z.height - 8);
+    }
+    ctx.restore();
+  }
+
+  // 新增限员区拖框预览
+  function drawZoneDraft() {
+    if (!state.drag || state.drag.type !== 'zone-new') return;
+    var d = state.drag;
+    var x = Math.min(d.x0, d.x1);
+    var y = Math.min(d.y0, d.y1);
+    var w = Math.abs(d.x1 - d.x0);
+    var h = Math.abs(d.y1 - d.y0);
+    ctx.save();
+    ctx.fillStyle = 'rgba(45,212,191,0.14)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#2dd4bf';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([7, 5]);
+    ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
   // ---------- 道具交接区绘制 ----------
   function drawHandoffs(t) {
     if (!state.handoffs.length) return;
@@ -1609,6 +2211,8 @@
       row.addEventListener('click', function () {
         state.selectedPid = p.id;
         state.selectedKey = null;
+        state.selectedZoneId = null;
+        state.selectedObstacleId = null;
         renderPerformers();
         renderTimelineStatic();
         draw();
@@ -1619,6 +2223,7 @@
     document.getElementById('btn-add').disabled = state.performers.length >= 8;
     renderCues();
     renderHandoffs();
+    renderZones();
   }
 
   function addPerformer() {
@@ -2135,16 +2740,22 @@
     draw();
   });
 
-  // 键盘：空格播放/暂停，Delete 删选中帧/禁入矩形，Esc 退出新增禁入区
+  // 键盘：空格播放/暂停，Delete 删选中帧/矩形，Esc 退出新增模式
   window.addEventListener('keydown', function (e) {
     if (e.target.tagName === 'INPUT') return;
     if (e.code === 'Space') {
       e.preventDefault();
       setPlaying(!state.playing);
+    } else if (e.code === 'Escape' && state.addZoneMode) {
+      setAddZoneMode(false);
+      state.drag = null;
+      draw();
     } else if (e.code === 'Escape' && state.addObstacleMode) {
       setAddObstacleMode(false);
       state.drag = null;
       draw();
+    } else if ((e.code === 'Delete' || e.code === 'Backspace') && state.selectedZoneId) {
+      removeZone(state.selectedZoneId);
     } else if ((e.code === 'Delete' || e.code === 'Backspace') && state.selectedObstacleId) {
       removeObstacle(state.selectedObstacleId);
     } else if ((e.code === 'Delete' || e.code === 'Backspace') && state.selectedKey) {
@@ -2174,13 +2785,14 @@
   var snapStatusEl = document.getElementById('snap-status');
   var snapStatusTimer = null;
 
-  // 深拷贝当前场景（状态中的 performer/obstacle/handoff 均为纯数据）
+  // 深拷贝当前场景（状态中的 performer/obstacle/handoff/zone 均为纯数据）
   function serializeScene() {
     return JSON.parse(JSON.stringify({
       duration: state.duration,
       performers: state.performers,
       obstacles: state.obstacles,
-      handoffs: state.handoffs
+      handoffs: state.handoffs,
+      capacityZones: state.capacityZones
     }));
   }
 
@@ -2331,6 +2943,7 @@
         var np = s.scene.performers ? s.scene.performers.length : 0;
         var no = s.scene.obstacles ? s.scene.obstacles.length : 0;
         var nh = s.scene.handoffs ? s.scene.handoffs.length : 0;
+        var nz = s.scene.capacityZones ? s.scene.capacityZones.length : 0;
 
         var nameEl = document.createElement('span');
         nameEl.className = 'snap-item-name';
@@ -2340,7 +2953,7 @@
         var meta = document.createElement('span');
         meta.className = 'snap-item-meta';
         meta.textContent = s.scene.duration + 's · ' + np + '人' + (no ? ' · ' + no + '禁入' : '') +
-          (nh ? ' · ' + nh + '交接' : '') + ' · ' + formatTime(s.createdAt);
+          (nh ? ' · ' + nh + '交接' : '') + (nz ? ' · ' + nz + '限员' : '') + ' · ' + formatTime(s.createdAt);
 
         var loadBtn = document.createElement('button');
         loadBtn.type = 'button';

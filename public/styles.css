@@ -138,6 +138,81 @@ html, body {
 .obstacle-editor .ke-hint::before { content: "▣ "; color: #d29922; }
 .obstacle-editor input[type="text"] { width: 110px; }
 
+/* 顶部工具栏的限员区新增按钮激活态（青色系） */
+#btn-zone.active { background: #2dd4bf; border-color: #2dd4bf; color: #04201d; font-weight: 600; }
+
+/* 选中限员矩形的编辑条（青色系） */
+.zone-editor {
+  border-color: rgba(45, 212, 191, .5);
+  background: rgba(45, 212, 191, .08);
+}
+.zone-editor .ke-hint::before { content: "▦ "; color: #2dd4bf; }
+.zone-editor input[type="text"] { width: 110px; }
+.zone-editor input { width: 56px; }
+.zone-editor #ze-limit { width: 64px; }
+
+/* 区域限员面板 */
+.panel-zones { font-variant-numeric: tabular-nums; }
+.zone-list { padding: 6px 10px; }
+.zone-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  margin-bottom: 7px;
+  background: var(--bg-panel-2);
+  border-left-width: 3px;
+  border-left-color: #2dd4bf;
+}
+.zone-row.over { border-left-color: var(--danger); }
+.zone-row.degenerate { border-left-color: var(--text-dim); }
+.zone-row.selected { background: rgba(45, 212, 191, .08); }
+.zone-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+.zone-name-input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.zone-del { padding: 1px 7px; line-height: 1.4; }
+.zone-del:hover { color: var(--danger); border-color: var(--danger); }
+.zone-result { margin-top: 5px; font-size: 12px; color: var(--text-dim); }
+.zone-result-line { margin-top: 2px; line-height: 1.7; }
+.zone-peak { color: var(--text); }
+.zone-peak b { color: #2dd4bf; }
+.zone-over-chip {
+  display: inline-block;
+  font-size: 11px;
+  background: var(--danger-bg);
+  border: 1px solid rgba(248, 81, 73, .45);
+  color: #ffb3ae;
+  border-radius: 4px;
+  padding: 0 5px;
+  margin: 1px 4px 1px 0;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.zone-over-chip:hover { background: rgba(248, 81, 73, .3); text-decoration-style: solid; }
+.zone-members { color: var(--text); }
+.zone-member-tag {
+  display: inline-block;
+  font-size: 10px;
+  border-radius: 4px;
+  padding: 0 5px;
+  margin: 1px 4px 1px 0;
+  background: rgba(255, 179, 174, .12);
+  border: 1px solid rgba(248, 81, 73, .35);
+  color: #ffb3ae;
+}
+.zone-warn { color: #e3b341; }
+.zone-ok { color: #56d364; }
+
 /* 禁入区侵入结果行 */
 .obs-row {
   display: flex;

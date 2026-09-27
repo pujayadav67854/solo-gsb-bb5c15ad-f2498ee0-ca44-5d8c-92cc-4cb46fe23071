@@ -17,6 +17,7 @@
     </div>
     <div class="top-actions">
       <button id="btn-obstacle" class="btn" title="在画布上拖出一个轴对齐禁入矩形（再点空白处单击可放默认尺寸）">＋ 禁入区</button>
+      <button id="btn-zone" class="btn" title="在画布上拖出一个轴对齐限员矩形（再点空白处单击可放默认尺寸）">＋ 限员区</button>
       <button id="btn-sample" class="btn" title="载入内置路径交叉样例">重置样例</button>
       <button id="btn-clear" class="btn btn-ghost" title="清空全部走位点">清空</button>
     </div>
@@ -28,7 +29,7 @@
       <div class="panel">
         <div class="panel-head">
           <span>舞台（世界坐标 1000 × 600）</span>
-          <span class="hint">拖动圆点走位 · 双击空白加帧 · 右键圆点删帧 · 选中圆点可改安全半径 · 拖动禁入区矩形移位 · 右键矩形删除 · 虚线彩框＝选中者的入场口令 · 紫色虚线框＝道具交接区</span>
+          <span class="hint">拖动圆点走位 · 双击空白加帧 · 右键圆点删帧 · 选中圆点可改安全半径 · 拖动禁入区矩形移位 · 右键矩形删除 · 虚线彩框＝选中者的入场口令 · 紫色虚线框＝道具交接区 · 青色虚线框＝区域限员（当前超员变红）</span>
         </div>
         <div class="canvas-wrap">
           <canvas id="stage" width="1000" height="600"></canvas>
@@ -56,6 +57,23 @@
             <button id="oe-delete" class="btn btn-mini" type="button" title="删除该禁入矩形">✕ 删除</button>
           </div>
           <div class="ke-hint">轴对齐矩形：表演者按实时安全半径视为圆，连续解析侵入区间（无帧抽样）</div>
+        </div>
+        <div id="zone-editor" class="key-editor zone-editor" hidden>
+          <div class="ke-head">
+            <span id="ze-info" class="ke-info">限员矩形</span>
+            <label class="ke-radius-edit">名称 <input id="ze-name" type="text" /></label>
+            <label class="ke-radius-edit">
+              x <input id="ze-x" type="number" step="1" />
+              y <input id="ze-y" type="number" step="1" />
+              宽 <input id="ze-width" type="number" min="0" step="1" />
+              高 <input id="ze-height" type="number" min="0" step="1" />
+            </label>
+            <label class="ke-radius-edit">
+              人数上限 <input id="ze-limit" type="number" min="1" max="999" step="1" />
+            </label>
+            <button id="ze-delete" class="btn btn-mini" type="button" title="删除该限员区域">✕ 删除</button>
+          </div>
+          <div class="ke-hint">只统计圆心严格位于内部者：贴边、瞬时触角与零宽高区域不计；跨关键帧连续停留合并、同一人同次停留只计一次</div>
         </div>
       </div>
 
@@ -125,6 +143,22 @@
           沿分段直线轨迹连续求两人<strong>圆心同时严格位于交接区内部</strong>且<strong>间距 ≤ 触达距离</strong>
           的区间（贴边停留与仅瞬时触达不计，跨关键帧相接自动合并）；每段 [a,b] 若 b−a ≥ 最短持续秒数 d，
           给出起始时窗 [a, b−d]。<strong>点击时窗跳转播放头</strong>；编辑走位或交接参数即时重算，配置随快照保存。
+        </div>
+      </div>
+
+      <div class="panel panel-zones" id="panel-zones">
+        <div class="panel-head">
+          <span>区域限员（超员时段）</span>
+          <button id="btn-zone-add" class="btn btn-mini btn-primary" title="新增一个默认尺寸的限员区域（也可用顶部「＋ 限员区」在画布上拖出）">＋ 新增限员区</button>
+        </div>
+        <div id="zone-list" class="zone-list"></div>
+        <div id="zone-empty" class="cue-empty" hidden></div>
+        <div class="cue-hint">
+          只统计<strong>圆心严格位于矩形内部</strong>的人：贴边、瞬时触角与<strong>零宽高区域不计</strong>，
+          跨关键帧的连续停留合并、同一人同次停留只计一次；同刻进出一并处理，不产生零长度超员段。
+          人数超过上限时按<strong>区间 · 人数 · 人员名单</strong>列出（名单变化即分段），
+          并显示<strong>全程峰值人数</strong>（只计有正持续时间的状态）。<strong>点击区间起点跳转播放头</strong>；
+          编辑走位或限员配置即时重算，配置随快照保存。
         </div>
       </div>
 
